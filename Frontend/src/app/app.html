@@ -1,47 +1,28 @@
-@if (!user) {
-  <main class="login-page">
-    <section class="login-card">
-      <div class="brand-mark" aria-hidden="true">C</div>
-      <p class="eyebrow">TU ESPACIO DE PLANIFICACIÓN</p>
-      <h1>Bienvenido</h1>
-      <p class="muted">Inicia sesión para acceder a tu calendario.</p>
-      @if (error) { <p class="notice error" role="alert">{{ error }}</p> }
-      <form #loginForm="ngForm" (ngSubmit)="login(loginForm)" class="form-stack">
-        <label>Usuario
-          <input name="username" [(ngModel)]="loginName" autocomplete="username" required>
-        </label>
-        <label>Contraseña
-          <input name="password" [(ngModel)]="loginPassword" type="password" autocomplete="current-password" required>
-        </label>
-        <button class="primary" type="submit" [disabled]="loading || loginForm.invalid">
-          {{ loading ? 'Accediendo…' : 'Iniciar sesión' }}
-        </button>
-      </form>
-    </section>
-  </main>
+@if (!state.user) {
+  <app-login />
 } @else {
   <header class="site-header">
     <div class="header-top">
       <button class="wordmark" type="button" (click)="navigate('calendar')" aria-label="Ir al calendario">
         <span class="brand-mark small" aria-hidden="true">C</span> Calendar
       </button>
-      <h1 class="year-title">{{ year ?? '—' }}</h1>
+      <h1 class="year-title">{{ state.year ?? '—' }}</h1>
       <div class="account">
         <span>Mi calendario</span>
-        <button class="text-button" type="button" (click)="logout()">Cerrar sesión</button>
+        <button class="text-button" type="button" (click)="state.logout()">Cerrar sesión</button>
       </div>
     </div>
     <nav class="navigation" aria-label="Navegación principal">
       <div class="nav-left">
-        <button type="button" class="nav-link" [class.active]="view === 'calendar'" (click)="navigate('calendar')">Calendario</button>
+        <button type="button" class="nav-link" [class.active]="state.view === 'calendar'" (click)="navigate('calendar')">Calendario</button>
         <div class="menu">
-          <button type="button" class="nav-link" [class.active]="view !== 'calendar'"
-                  [attr.aria-expanded]="menuOpen" aria-controls="settings-menu" (click)="menuOpen = !menuOpen">
+          <button type="button" class="nav-link" [class.active]="state.view !== 'calendar'"
+                  [attr.aria-expanded]="state.menuOpen" aria-controls="settings-menu" (click)="state.menuOpen = !state.menuOpen">
             Configuración <span aria-hidden="true">⌄</span>
           </button>
-          @if (menuOpen) {
+          @if (state.menuOpen) {
             <div class="dropdown" id="settings-menu">
-              @if (user.es_administrador) {
+              @if (state.user.es_administrador) {
                 <button type="button" (click)="navigate('usuarios')">Usuarios</button>
               }
               <button type="button" (click)="navigate('tipos')">Tipos de fecha</button>
@@ -51,140 +32,22 @@
         </div>
       </div>
       <label class="year-selector">Año
-        <select [value]="year ?? ''" (change)="changeYear($any($event.target).value)" [disabled]="!years.length">
-          @if (!years.length) { <option value="">Sin años</option> }
-          @for (option of years; track option) { <option [value]="option">{{ option }}</option> }
+        <select [value]="state.year ?? ''" (change)="state.changeYear($any($event.target).value)" [disabled]="!state.years.length">
+          @if (!state.years.length) { <option value="">Sin años</option> }
+          @for (option of state.years; track option) { <option [value]="option">{{ option }}</option> }
         </select>
       </label>
     </nav>
   </header>
 
   <main class="main-content">
-    @if (error) { <p class="notice error" role="alert">{{ error }}</p> }
-    @if (message) { <p class="notice success" role="status">{{ message }}</p> }
-    @if (view === 'calendar') {
-      <div class="section-heading">
-        <div>
-          <p class="eyebrow">TU AÑO DE UN VISTAZO</p>
-          <h2>Calendario anual</h2>
-          <p class="muted">Consulta tus proyectos y fechas señaladas.</p>
-        </div>
-        <form #yearForm="ngForm" class="create-year" (ngSubmit)="createYear(yearForm)">
-          <label for="new-year">Nuevo año</label>
-          <input id="new-year" name="newYear" [(ngModel)]="newYear" type="number" min="1" max="9999" step="1" required>
-          <button type="submit" class="primary" [disabled]="loading || yearForm.invalid">Crear año</button>
-        </form>
-      </div>
-      @if (calendarLoading) {
-        <p class="empty-state" role="status">Cargando calendario…</p>
-      } @else if (year === null) {
-        <div class="empty-state"><strong>Aún no hay años disponibles.</strong><p>Crea un año para empezar.</p></div>
-      } @else if (calendar.length) {
-        <div class="calendar-grid">
-          @for (month of calendar; track month.name) {
-            <section class="month-card" [attr.aria-label]="month.name + ' ' + year">
-              <h3>{{ month.name }}</h3>
-              <div class="month-grid">
-                @for (weekday of weekdays; track $index) { <span class="weekday">{{ weekday }}</span> }
-                @for (day of month.days; track $index) {
-                  @if (day) {
-                    <div class="day" [attr.aria-label]="day.date">
-                      <span class="day-number">{{ day.number }}</span>
-                      @for (typing of day.typings; track typing.tipo_id) {
-                        <span class="event" [style.border-left-color]="typing.color || '#9ca3af'"
-                              [title]="(typing.nombre || 'Tipo de fecha') + (typing.en_borde ? ' (borde)' : '')">
-                          {{ typing.nombre || 'Tipo de fecha' }}{{ typing.en_borde ? ' · borde' : '' }}
-                        </span>
-                      }
-                      @for (assignment of day.assignments; track assignment.proyecto_id + '-' + assignment.es_prevision) {
-                        <span class="event project-event" [style.border-left-color]="assignment.color || '#9ca3af'"
-                              [title]="(assignment.nombre || 'Proyecto') + (assignment.es_prevision ? ' (previsión)' : '')">
-                          {{ assignment.nombre || 'Proyecto' }}{{ assignment.es_prevision ? ' · prev.' : '' }}
-                        </span>
-                      }
-                    </div>
-                  } @else { <span class="blank-day"></span> }
-                }
-              </div>
-            </section>
-          }
-        </div>
-      }
-    } @else if (view === 'usuarios') {
-      <div class="section-heading"><div><p class="eyebrow">CONFIGURACIÓN</p><h2>Usuarios</h2><p class="muted">Administra el acceso a la aplicación.</p></div></div>
-      <div class="management-layout">
-        <section class="panel">
-          <h3>Usuarios existentes</h3>
-          @if (!users.length && !loading) { <p class="muted">No hay usuarios.</p> }
-          @for (item of users; track item.usuario_id) {
-            <div class="list-item">
-              <div><strong>{{ item.nombre || item.nombre_usuario || 'Usuario' }}</strong><small>{{ item.nombre_usuario || 'Sin credenciales' }} · {{ item.activo ? 'Activo' : 'Inactivo' }}{{ item.es_administrador ? ' · Administrador' : '' }}</small></div>
-              <button type="button" class="secondary" (click)="editUser(item)">Editar</button>
-            </div>
-          }
-        </section>
-        <section class="panel">
-          <h3>{{ editingId === null ? 'Nuevo usuario' : 'Editar usuario' }}</h3>
-          <form #userFormRef="ngForm" (ngSubmit)="saveUser(userFormRef)" class="form-stack">
-            <label>Nombre <input name="nombre" [(ngModel)]="userForm.nombre" maxlength="255"></label>
-            <label>Primer apellido <input name="apellido1" [(ngModel)]="userForm.apellido1" maxlength="255"></label>
-            <label>Segundo apellido <input name="apellido2" [(ngModel)]="userForm.apellido2" maxlength="255"></label>
-            <label>Usuario de acceso <input name="nombre_usuario" [(ngModel)]="userForm.nombre_usuario" maxlength="255" [required]="editingId === null"></label>
-            <label>Contraseña <input name="password" type="password" [(ngModel)]="userForm.password" minlength="8" maxlength="1024" [required]="editingId === null" autocomplete="new-password"></label>
-            @if (editingId !== null) { <small class="muted">Deja la contraseña vacía para conservarla. Para un usuario sin credenciales, indica usuario y contraseña.</small> }
-            <label class="check"><input name="activo" type="checkbox" [(ngModel)]="userForm.activo"> Activo</label>
-            <label class="check"><input name="admin" type="checkbox" [(ngModel)]="userForm.es_administrador"> Administrador</label>
-            <div class="form-actions"><button class="primary" type="submit" [disabled]="loading || userFormRef.invalid">Guardar</button>
-              @if (editingId !== null) { <button type="button" class="secondary" (click)="resetForm()">Cancelar</button> }
-            </div>
-          </form>
-        </section>
-      </div>
-    } @else if (view === 'proyectos') {
-      <div class="section-heading"><div><p class="eyebrow">CONFIGURACIÓN</p><h2>Proyectos</h2><p class="muted">Organiza los proyectos compartidos.</p></div></div>
-      <div class="management-layout">
-        <section class="panel"><h3>Proyectos existentes</h3>
-          @if (!projects.length && !loading) { <p class="muted">No hay proyectos.</p> }
-          @for (item of projects; track item.proyecto_id) {
-            <div class="list-item"><div><strong><span class="color-dot" [style.background]="item.color || '#9ca3af'"></span>{{ item.nombre || 'Sin nombre' }}</strong><small>{{ item.descripcion || 'Sin descripción' }}</small></div><button type="button" class="secondary" (click)="editProject(item)">Editar</button></div>
-          }
-        </section>
-        <section class="panel"><h3>{{ editingId === null ? 'Nuevo proyecto' : 'Editar proyecto' }}</h3>
-          <form #projectFormRef="ngForm" (ngSubmit)="saveProject(projectFormRef)" class="form-stack">
-            <label>Nombre <input name="nombre" [(ngModel)]="projectForm.nombre" maxlength="255" required></label>
-            <label>Descripción <textarea name="descripcion" [(ngModel)]="projectForm.descripcion" rows="3"></textarea></label>
-            <div class="form-row">
-              <label>Duración <input name="duracion" type="number" min="-32768" max="880" step="1" [(ngModel)]="projectForm.duracion"></label>
-              <label>Restantes <input name="restantes" type="number" min="-32768" max="880" step="1" [(ngModel)]="projectForm.restantes"></label>
-            </div>
-            <label>Color <input name="color" type="color" [(ngModel)]="projectForm.color"></label>
-            <div class="form-actions"><button class="primary" type="submit" [disabled]="loading || projectFormRef.invalid">Guardar</button>
-              @if (editingId !== null) { <button type="button" class="secondary" (click)="resetForm()">Cancelar</button> }
-            </div>
-          </form>
-        </section>
-      </div>
-    } @else {
-      <div class="section-heading"><div><p class="eyebrow">CONFIGURACIÓN</p><h2>Tipos de fecha</h2><p class="muted">Define cómo identificar las fechas especiales.</p></div></div>
-      <div class="management-layout">
-        <section class="panel"><h3>Tipos existentes</h3>
-          @if (!dateTypes.length && !loading) { <p class="muted">No hay tipos de fecha.</p> }
-          @for (item of dateTypes; track item.tipo_id) {
-            <div class="list-item"><div><strong><span class="color-dot" [style.background]="item.color || '#9ca3af'"></span>{{ item.nombre || 'Sin nombre' }}</strong><small>{{ item.en_borde ? 'En borde' : 'Sin borde' }}</small></div><button type="button" class="secondary" (click)="editType(item)">Editar</button></div>
-          }
-        </section>
-        <section class="panel"><h3>{{ editingId === null ? 'Nuevo tipo de fecha' : 'Editar tipo de fecha' }}</h3>
-          <form #typeFormRef="ngForm" (ngSubmit)="saveType(typeFormRef)" class="form-stack">
-            <label>Nombre <input name="nombre" [(ngModel)]="typeForm.nombre" maxlength="255" required [readonly]="editingId !== null && typeForm.nombre === 'Festivo'"></label>
-            <label>Descripción <textarea name="descripcion" [(ngModel)]="typeForm.descripcion" rows="3"></textarea></label>
-            <label>Color <input name="color" type="color" [(ngModel)]="typeForm.color"></label>
-            <label class="check"><input name="en_borde" type="checkbox" [(ngModel)]="typeForm.en_borde" [disabled]="editingId !== null && typeForm.nombre === 'Festivo'"> En borde</label>
-            <div class="form-actions"><button class="primary" type="submit" [disabled]="loading || typeFormRef.invalid">Guardar</button>
-              @if (editingId !== null) { <button type="button" class="secondary" (click)="resetForm()">Cancelar</button> }
-            </div>
-          </form>
-        </section>
-      </div>
+    @if (state.error) { <p class="notice error" role="alert">{{ state.error }}</p> }
+    @if (state.message) { <p class="notice success" role="status">{{ state.message }}</p> }
+    @switch (state.view) {
+      @case ('calendar') { <app-calendar /> }
+      @case ('usuarios') { <app-users /> }
+      @case ('proyectos') { <app-projects /> }
+      @case ('tipos') { <app-date-types /> }
     }
   </main>
 }

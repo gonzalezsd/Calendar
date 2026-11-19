@@ -1,0 +1,20 @@
+<div class="section-heading"><div><p class="eyebrow">CONFIGURACIÓN</p><h2>Tipos de fecha</h2><p class="muted">Define cómo identificar las fechas especiales.</p></div></div>
+<div class="management-layout">
+  <section class="panel"><h3>Tipos existentes</h3>
+    @if (!dateTypes.length && !state.loading) { <p class="muted">No hay tipos de fecha.</p> }
+    @for (item of dateTypes; track item.tipo_id) {
+      <div class="list-item"><div><strong><span class="color-dot" [style.background]="item.color || '#9ca3af'"></span>{{ item.nombre || 'Sin nombre' }}</strong><small>{{ item.en_borde ? 'En borde' : 'Sin borde' }}</small></div><button type="button" class="secondary" (click)="editType(item)">Editar</button></div>
+    }
+  </section>
+  <section class="panel"><h3>{{ editingId === null ? 'Nuevo tipo de fecha' : 'Editar tipo de fecha' }}</h3>
+    <form #typeFormRef="ngForm" (ngSubmit)="saveType(typeFormRef)" class="form-stack">
+      <label>Nombre <input name="nombre" [(ngModel)]="typeForm.nombre" maxlength="255" required [readonly]="editingId !== null && typeForm.nombre === 'Festivo'"></label>
+      <label>Descripción <textarea name="descripcion" [(ngModel)]="typeForm.descripcion" rows="3"></textarea></label>
+      <label>Color <input name="color" type="color" [(ngModel)]="typeForm.color"></label>
+      <label class="check"><input name="en_borde" type="checkbox" [(ngModel)]="typeForm.en_borde" [disabled]="editingId !== null && typeForm.nombre === 'Festivo'"> En borde</label>
+      <div class="form-actions"><button class="primary" type="submit" [disabled]="state.loading || typeFormRef.invalid">Guardar</button>
+        @if (editingId !== null) { <button type="button" class="secondary" (click)="resetForm()">Cancelar</button> }
+      </div>
+    </form>
+  </section>
+</div>

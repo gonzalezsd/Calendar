@@ -5,6 +5,10 @@ permite crear o modificar usuarios, proyectos y tipos de fecha. La gestión de
 usuarios solo está disponible para administradores. La vista anual muestra las
 asignaciones y los tipados del usuario autenticado; no permite editarlos.
 
+El código de `src/app` está organizado en componentes independientes para acceso,
+calendario, usuarios, proyectos y tipos de fecha. `core` contiene los modelos y
+el estado compartido de la sesión y el calendario.
+
 ## Desarrollo
 
 1. Prepara la base de datos y arranca Flask como se explica en

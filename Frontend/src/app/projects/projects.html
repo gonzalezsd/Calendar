@@ -1,0 +1,23 @@
+<div class="section-heading"><div><p class="eyebrow">CONFIGURACIÓN</p><h2>Proyectos</h2><p class="muted">Organiza los proyectos compartidos.</p></div></div>
+<div class="management-layout">
+  <section class="panel"><h3>Proyectos existentes</h3>
+    @if (!projects.length && !state.loading) { <p class="muted">No hay proyectos.</p> }
+    @for (item of projects; track item.proyecto_id) {
+      <div class="list-item"><div><strong><span class="color-dot" [style.background]="item.color || '#9ca3af'"></span>{{ item.nombre || 'Sin nombre' }}</strong><small>{{ item.descripcion || 'Sin descripción' }}</small></div><button type="button" class="secondary" (click)="editProject(item)">Editar</button></div>
+    }
+  </section>
+  <section class="panel"><h3>{{ editingId === null ? 'Nuevo proyecto' : 'Editar proyecto' }}</h3>
+    <form #projectFormRef="ngForm" (ngSubmit)="saveProject(projectFormRef)" class="form-stack">
+      <label>Nombre <input name="nombre" [(ngModel)]="projectForm.nombre" maxlength="255" required></label>
+      <label>Descripción <textarea name="descripcion" [(ngModel)]="projectForm.descripcion" rows="3"></textarea></label>
+      <div class="form-row">
+        <label>Duración <input name="duracion" type="number" min="-32768" max="880" step="1" [(ngModel)]="projectForm.duracion"></label>
+        <label>Restantes <input name="restantes" type="number" min="-32768" max="880" step="1" [(ngModel)]="projectForm.restantes"></label>
+      </div>
+      <label>Color <input name="color" type="color" [(ngModel)]="projectForm.color"></label>
+      <div class="form-actions"><button class="primary" type="submit" [disabled]="state.loading || projectFormRef.invalid">Guardar</button>
+        @if (editingId !== null) { <button type="button" class="secondary" (click)="resetForm()">Cancelar</button> }
+      </div>
+    </form>
+  </section>
+</div>

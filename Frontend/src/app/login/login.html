@@ -1,0 +1,20 @@
+<main class="login-page">
+  <section class="login-card">
+    <div class="brand-mark" aria-hidden="true">C</div>
+    <p class="eyebrow">TU ESPACIO DE PLANIFICACIÓN</p>
+    <h1>Bienvenido</h1>
+    <p class="muted">Inicia sesión para acceder a tu calendario.</p>
+    @if (state.error) { <p class="notice error" role="alert">{{ state.error }}</p> }
+    <form #loginForm="ngForm" (ngSubmit)="login(loginForm)" class="form-stack">
+      <label>Usuario
+        <input name="username" [(ngModel)]="loginName" autocomplete="username" required>
+      </label>
+      <label>Contraseña
+        <input name="password" [(ngModel)]="loginPassword" type="password" autocomplete="current-password" required>
+      </label>
+      <button class="primary" type="submit" [disabled]="state.loading || loginForm.invalid">
+        {{ state.loading ? 'Accediendo…' : 'Iniciar sesión' }}
+      </button>
+    </form>
+  </section>
+</main>

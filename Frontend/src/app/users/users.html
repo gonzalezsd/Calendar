@@ -1,0 +1,29 @@
+<div class="section-heading"><div><p class="eyebrow">CONFIGURACIÓN</p><h2>Usuarios</h2><p class="muted">Administra el acceso a la aplicación.</p></div></div>
+<div class="management-layout">
+  <section class="panel">
+    <h3>Usuarios existentes</h3>
+    @if (!users.length && !state.loading) { <p class="muted">No hay usuarios.</p> }
+    @for (item of users; track item.usuario_id) {
+      <div class="list-item">
+        <div><strong>{{ item.nombre || item.nombre_usuario || 'Usuario' }}</strong><small>{{ item.nombre_usuario || 'Sin credenciales' }} · {{ item.activo ? 'Activo' : 'Inactivo' }}{{ item.es_administrador ? ' · Administrador' : '' }}</small></div>
+        <button type="button" class="secondary" (click)="editUser(item)">Editar</button>
+      </div>
+    }
+  </section>
+  <section class="panel">
+    <h3>{{ editingId === null ? 'Nuevo usuario' : 'Editar usuario' }}</h3>
+    <form #userFormRef="ngForm" (ngSubmit)="saveUser(userFormRef)" class="form-stack">
+      <label>Nombre <input name="nombre" [(ngModel)]="userForm.nombre" maxlength="255"></label>
+      <label>Primer apellido <input name="apellido1" [(ngModel)]="userForm.apellido1" maxlength="255"></label>
+      <label>Segundo apellido <input name="apellido2" [(ngModel)]="userForm.apellido2" maxlength="255"></label>
+      <label>Usuario de acceso <input name="nombre_usuario" [(ngModel)]="userForm.nombre_usuario" maxlength="255" [required]="editingId === null"></label>
+      <label>Contraseña <input name="password" type="password" [(ngModel)]="userForm.password" minlength="8" maxlength="1024" [required]="editingId === null" autocomplete="new-password"></label>
+      @if (editingId !== null) { <small class="muted">Deja la contraseña vacía para conservarla. Para un usuario sin credenciales, indica usuario y contraseña.</small> }
+      <label class="check"><input name="activo" type="checkbox" [(ngModel)]="userForm.activo"> Activo</label>
+      <label class="check"><input name="admin" type="checkbox" [(ngModel)]="userForm.es_administrador"> Administrador</label>
+      <div class="form-actions"><button class="primary" type="submit" [disabled]="state.loading || userFormRef.invalid">Guardar</button>
+        @if (editingId !== null) { <button type="button" class="secondary" (click)="resetForm()">Cancelar</button> }
+      </div>
+    </form>
+  </section>
+</div>

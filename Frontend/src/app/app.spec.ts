@@ -1,8 +1,14 @@
-import { TestBed, fakeAsync, flushMicrotasks, tick } from '@angular/core/testing';
+import { ComponentFixture, TestBed, fakeAsync, flushMicrotasks, tick } from '@angular/core/testing';
 import { provideHttpClient } from '@angular/common/http';
 import { HttpTestingController, provideHttpClientTesting } from '@angular/common/http/testing';
+import { By } from '@angular/platform-browser';
 import { NgForm } from '@angular/forms';
 import { App } from './app';
+import { LoginComponent } from './login/login';
+import { CalendarComponent } from './calendar/calendar';
+import { ProjectsComponent } from './projects/projects';
+import { UsersComponent } from './users/users';
+import { DateTypesComponent } from './date-types/date-types';
 
 describe('Calendar application', () => {
   let http: HttpTestingController;
@@ -23,10 +29,11 @@ describe('Calendar application', () => {
     localStorage.removeItem('calendar_expiry');
   });
 
-  function login(app: App): void {
-    app.loginName = 'admin';
-    app.loginPassword = 'password123';
-    void app.login({ invalid: false } as NgForm);
+  function login(fixture: ComponentFixture<App>): void {
+    const loginComponent: LoginComponent = fixture.debugElement.query(By.directive(LoginComponent)).componentInstance;
+    loginComponent.loginName = 'admin';
+    loginComponent.loginPassword = 'password123';
+    void loginComponent.login({ invalid: false } as NgForm);
     http.expectOne('/api/auth/login').flush({ access_token: 'token', expires_in: 3600 });
     flushMicrotasks();
     const me = http.expectOne('/api/me');
@@ -47,19 +54,19 @@ describe('Calendar application', () => {
     fixture.detectChanges();
     expect(fixture.nativeElement.textContent).toContain('Iniciar sesión');
     expect(fixture.nativeElement.textContent).not.toContain('Configuración');
-    login(fixture.componentInstance);
+    login(fixture);
     fixture.detectChanges();
     expect(localStorage.getItem('calendar_token')).toBe('token');
     expect(fixture.nativeElement.querySelector('.year-title').textContent.trim()).toBe('2026');
     expect(fixture.nativeElement.textContent).toContain('Festivo');
     expect(fixture.nativeElement.textContent).toContain('Trabajo');
-    void fixture.componentInstance.changeYear('2025');
+    void fixture.componentInstance.state.changeYear('2025');
     http.expectOne('/api/calendario/2025').flush({ asignaciones: [], tipados: [] });
     flushMicrotasks();
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('.year-title').textContent.trim()).toBe('2025');
     expect(fixture.nativeElement.textContent).not.toContain('Trabajo');
-    fixture.componentInstance.logout();
+    fixture.componentInstance.state.logout();
   }));
 
   it('restores a valid stored session and clears it when the token is rejected', fakeAsync(() => {
@@ -79,9 +86,11 @@ describe('Calendar application', () => {
     const fixture = TestBed.createComponent(App);
     fixture.detectChanges();
     const app = fixture.componentInstance;
-    login(app);
-    app.newYear = 2027;
-    void app.createYear({ invalid: false } as NgForm);
+    login(fixture);
+    fixture.detectChanges();
+    const calendar: CalendarComponent = fixture.debugElement.query(By.directive(CalendarComponent)).componentInstance;
+    calendar.newYear = 2027;
+    void calendar.createYear({ invalid: false } as NgForm);
     const request = http.expectOne('/api/new_year');
     expect(request.request.body).toEqual({ year: 2027 });
     request.flush({ fecha: '2027-01-01', tipo_id: 1, usuario_id: 1 });
@@ -102,12 +111,14 @@ describe('Calendar application', () => {
     const fixture = TestBed.createComponent(App);
     fixture.detectChanges();
     const app = fixture.componentInstance;
-    login(app);
-    void app.navigate('proyectos');
+    login(fixture);
+    app.navigate('proyectos');
+    fixture.detectChanges();
     http.expectOne('/api/proyectos').flush([]);
     flushMicrotasks();
-    app.projectForm.nombre = 'Proyecto A';
-    void app.saveProject({ invalid: false } as NgForm);
+    const projects: ProjectsComponent = fixture.debugElement.query(By.directive(ProjectsComponent)).componentInstance;
+    projects.projectForm.nombre = 'Proyecto A';
+    void projects.saveProject({ invalid: false } as NgForm);
     const created = http.expectOne('/api/proyectos');
     expect(created.request.method).toBe('POST');
     expect(created.request.body.nombre).toBe('Proyecto A');
@@ -118,9 +129,9 @@ describe('Calendar application', () => {
     flushMicrotasks();
     http.expectOne('/api/calendario/2026').flush({ asignaciones: [], tipados: [] });
     flushMicrotasks();
-    app.editProject(project);
-    app.projectForm.nombre = 'Proyecto B';
-    void app.saveProject({ invalid: false } as NgForm);
+    projects.editProject(project);
+    projects.projectForm.nombre = 'Proyecto B';
+    void projects.saveProject({ invalid: false } as NgForm);
     const updated = http.expectOne('/api/proyectos/1');
     expect(updated.request.method).toBe('PATCH');
     expect(updated.request.body.nombre).toBe('Proyecto B');
@@ -132,21 +143,23 @@ describe('Calendar application', () => {
     flushMicrotasks();
     fixture.detectChanges();
     expect(fixture.nativeElement.textContent).toContain('Proyecto B');
-    app.logout();
+    app.state.logout();
   }));
 
   it('creates a user and sends only changed fields when editing', fakeAsync(() => {
     const fixture = TestBed.createComponent(App);
     fixture.detectChanges();
     const app = fixture.componentInstance;
-    login(app);
-    void app.navigate('usuarios');
+    login(fixture);
+    app.navigate('usuarios');
+    fixture.detectChanges();
     http.expectOne('/api/usuarios').flush([]);
     flushMicrotasks();
-    app.userForm.nombre = 'Ana';
-    app.userForm.nombre_usuario = 'ana';
-    app.userForm.password = 'password123';
-    void app.saveUser({ invalid: false } as NgForm);
+    const users: UsersComponent = fixture.debugElement.query(By.directive(UsersComponent)).componentInstance;
+    users.userForm.nombre = 'Ana';
+    users.userForm.nombre_usuario = 'ana';
+    users.userForm.password = 'password123';
+    void users.saveUser({ invalid: false } as NgForm);
     const created = http.expectOne('/api/usuarios');
     expect(created.request.body.nombre_usuario).toBe('ana');
     expect(created.request.body.password).toBe('password123');
@@ -157,9 +170,9 @@ describe('Calendar application', () => {
     const user = { usuario_id: 2, nombre: 'Ana', apellido1: null, apellido2: null, activo: true, es_administrador: false, nombre_usuario: 'ana' };
     http.expectOne('/api/usuarios').flush([user]);
     flushMicrotasks();
-    app.editUser(user);
-    app.userForm.nombre = 'Ana María';
-    void app.saveUser({ invalid: false } as NgForm);
+    users.editUser(user);
+    users.userForm.nombre = 'Ana María';
+    void users.saveUser({ invalid: false } as NgForm);
     const updated = http.expectOne('/api/usuarios/2');
     expect(updated.request.method).toBe('PATCH');
     expect(updated.request.body).toEqual({ nombre: 'Ana María' });
@@ -169,20 +182,22 @@ describe('Calendar application', () => {
     flushMicrotasks();
     http.expectOne('/api/usuarios').flush([{ ...user, nombre: 'Ana María' }]);
     flushMicrotasks();
-    expect(app.users[0].nombre).toBe('Ana María');
-    app.logout();
+    expect(users.users[0].nombre).toBe('Ana María');
+    app.state.logout();
   }));
 
   it('creates and edits date types through the backend', fakeAsync(() => {
     const fixture = TestBed.createComponent(App);
     fixture.detectChanges();
     const app = fixture.componentInstance;
-    login(app);
-    void app.navigate('tipos');
+    login(fixture);
+    app.navigate('tipos');
+    fixture.detectChanges();
     http.expectOne('/api/tipos-fecha').flush([]);
     flushMicrotasks();
-    app.typeForm.nombre = 'Vacaciones';
-    void app.saveType({ invalid: false } as NgForm);
+    const types: DateTypesComponent = fixture.debugElement.query(By.directive(DateTypesComponent)).componentInstance;
+    types.typeForm.nombre = 'Vacaciones';
+    void types.saveType({ invalid: false } as NgForm);
     const created = http.expectOne('/api/tipos-fecha');
     expect(created.request.method).toBe('POST');
     expect(created.request.body.en_borde).toBe(false);
@@ -193,9 +208,9 @@ describe('Calendar application', () => {
     flushMicrotasks();
     http.expectOne('/api/calendario/2026').flush({ asignaciones: [], tipados: [] });
     flushMicrotasks();
-    app.editType(type);
-    app.typeForm.en_borde = true;
-    void app.saveType({ invalid: false } as NgForm);
+    types.editType(type);
+    types.typeForm.en_borde = true;
+    void types.saveType({ invalid: false } as NgForm);
     const updated = http.expectOne('/api/tipos-fecha/2');
     expect(updated.request.method).toBe('PATCH');
     expect(updated.request.body.en_borde).toBe(true);
@@ -205,7 +220,53 @@ describe('Calendar application', () => {
     flushMicrotasks();
     http.expectOne('/api/calendario/2026').flush({ asignaciones: [], tipados: [] });
     flushMicrotasks();
-    expect(app.dateTypes[0].en_borde).toBeTrue();
-    app.logout();
+    expect(types.dateTypes[0].en_borde).toBeTrue();
+    app.state.logout();
+  }));
+
+  it('resets feature forms and reloads data when navigating between sections', fakeAsync(() => {
+    const fixture = TestBed.createComponent(App);
+    fixture.detectChanges();
+    const app = fixture.componentInstance;
+    login(fixture);
+    app.navigate('proyectos');
+    fixture.detectChanges();
+    http.expectOne('/api/proyectos').flush([]);
+    flushMicrotasks();
+    const projects: ProjectsComponent = fixture.debugElement.query(By.directive(ProjectsComponent)).componentInstance;
+    projects.projectForm.nombre = 'Sin guardar';
+    app.navigate('proyectos');
+    http.expectOne('/api/proyectos').flush([]);
+    flushMicrotasks();
+    expect(projects.projectForm.nombre).toBe('');
+    projects.projectForm.nombre = 'Sin guardar';
+    app.navigate('tipos');
+    fixture.detectChanges();
+    http.expectOne('/api/tipos-fecha').flush([]);
+    flushMicrotasks();
+    app.navigate('proyectos');
+    fixture.detectChanges();
+    http.expectOne('/api/proyectos').flush([]);
+    flushMicrotasks();
+    const reopened: ProjectsComponent = fixture.debugElement.query(By.directive(ProjectsComponent)).componentInstance;
+    expect(reopened).not.toBe(projects);
+    expect(reopened.projectForm.nombre).toBe('');
+    app.state.logout();
+  }));
+
+  it('does not expose user management to a non-administrator', fakeAsync(() => {
+    localStorage.setItem('calendar_token', 'saved');
+    localStorage.setItem('calendar_expiry', String(Date.now() + 3600000));
+    const fixture = TestBed.createComponent(App);
+    fixture.detectChanges();
+    http.expectOne('/api/me').flush({ usuario_id: 2, activo: true, es_administrador: false });
+    flushMicrotasks();
+    http.expectOne('/api/get_years').flush({ years: [] });
+    flushMicrotasks();
+    fixture.detectChanges();
+    fixture.componentInstance.state.menuOpen = true;
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('#settings-menu').textContent).not.toContain('Usuarios');
+    fixture.componentInstance.state.logout();
   }));
 });

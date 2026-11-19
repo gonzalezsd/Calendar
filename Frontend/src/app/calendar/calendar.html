@@ -1,0 +1,47 @@
+<div class="section-heading">
+  <div>
+    <p class="eyebrow">TU AÑO DE UN VISTAZO</p>
+    <h2>Calendario anual</h2>
+    <p class="muted">Consulta tus proyectos y fechas señaladas.</p>
+  </div>
+  <form #yearForm="ngForm" class="create-year" (ngSubmit)="createYear(yearForm)">
+    <label for="new-year">Nuevo año</label>
+    <input id="new-year" name="newYear" [(ngModel)]="newYear" type="number" min="1" max="9999" step="1" required>
+    <button type="submit" class="primary" [disabled]="state.loading || yearForm.invalid">Crear año</button>
+  </form>
+</div>
+@if (state.calendarLoading) {
+  <p class="empty-state" role="status">Cargando calendario…</p>
+} @else if (state.year === null) {
+  <div class="empty-state"><strong>Aún no hay años disponibles.</strong><p>Crea un año para empezar.</p></div>
+} @else if (state.calendar.length) {
+  <div class="calendar-grid">
+    @for (month of state.calendar; track month.name) {
+      <section class="month-card" [attr.aria-label]="month.name + ' ' + state.year">
+        <h3>{{ month.name }}</h3>
+        <div class="month-grid">
+          @for (weekday of weekdays; track $index) { <span class="weekday">{{ weekday }}</span> }
+          @for (day of month.days; track $index) {
+            @if (day) {
+              <div class="day" [attr.aria-label]="day.date">
+                <span class="day-number">{{ day.number }}</span>
+                @for (typing of day.typings; track typing.tipo_id) {
+                  <span class="event" [style.border-left-color]="typing.color || '#9ca3af'"
+                        [title]="(typing.nombre || 'Tipo de fecha') + (typing.en_borde ? ' (borde)' : '')">
+                    {{ typing.nombre || 'Tipo de fecha' }}{{ typing.en_borde ? ' · borde' : '' }}
+                  </span>
+                }
+                @for (assignment of day.assignments; track assignment.proyecto_id + '-' + assignment.es_prevision) {
+                  <span class="event project-event" [style.border-left-color]="assignment.color || '#9ca3af'"
+                        [title]="(assignment.nombre || 'Proyecto') + (assignment.es_prevision ? ' (previsión)' : '')">
+                    {{ assignment.nombre || 'Proyecto' }}{{ assignment.es_prevision ? ' · prev.' : '' }}
+                  </span>
+                }
+              </div>
+            } @else { <span class="blank-day"></span> }
+          }
+        </div>
+      </section>
+    }
+  </div>
+}
