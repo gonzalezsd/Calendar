@@ -52,17 +52,22 @@ usuario impide su uso. No son tokens JWT.
 | Método y ruta | Cuerpo o resultado |
 | --- | --- |
 | `POST /api/auth/login` | `nombre_usuario`, `password`; devuelve `access_token`, `token_type`, `expires_in` |
+| `GET /api/me` | Datos y permisos del usuario autenticado |
+| `GET /api/usuarios` | Lista de usuarios y nombres de acceso, solo para administradores |
 | `POST /api/usuarios` | Campos de usuario, `nombre_usuario`, `password` |
 | `PATCH /api/usuarios/{usuario_id}` | Campos de usuario, `nombre_usuario` y/o `password` |
 | `POST /api/proyectos` | Campos de proyecto |
+| `GET /api/proyectos` | Lista de proyectos compartidos |
 | `PATCH /api/proyectos/{proyecto_id}` | Campos de proyecto a modificar |
 | `POST /api/tipos-fecha` | Campos de tipo de fecha; `en_borde` es obligatorio |
+| `GET /api/tipos-fecha` | Lista de tipos de fecha compartidos |
 | `PATCH /api/tipos-fecha/{tipo_id}` | Campos de tipo de fecha a modificar |
 | `POST /api/asignaciones` | `fecha`, `proyecto_id`, `es_prevision` |
 | `DELETE /api/asignaciones/{fecha}/{proyecto_id}/{es_prevision}` | `es_prevision` es `true` o `false` |
 | `POST /api/tipados` | `fecha`, `tipo_id` |
 | `DELETE /api/tipados/{fecha}/{tipo_id}` | Elimina el tipado del usuario autenticado |
 | `GET /api/get_years` | Devuelve `{"years": [2025, 2026]}` con los años del usuario autenticado, sin duplicados y ordenados |
+| `GET /api/calendario/{year}` | Asignaciones y tipados del usuario autenticado para el año indicado |
 | `POST /api/new_year` | `{"year": 2026}`; crea un tipado `Festivo` para el 1 de enero del usuario autenticado |
 
 Solo los administradores pueden crear o modificar usuarios. Los demás cambios

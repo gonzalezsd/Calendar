@@ -265,6 +265,33 @@ class APITests(unittest.TestCase):
             second = executor.submit(assign, "/api/tipados", {"fecha": "2032-01-01", "tipo_id": kind})
             self.assertEqual(sorted([first.result(), second.result()]), [201, 409])
 
+    def test_read_endpoints_respect_permissions_and_calendar_ownership(self):
+        self.create_user("other")
+        other = self.login("other", "password123")
+        self.assertEqual(self.client.get("/api/me").status_code, 401)
+        self.assertTrue(self.client.get("/api/me", headers=self.admin).json["es_administrador"])
+        self.assertFalse(self.client.get("/api/me", headers=other).json["es_administrador"])
+        self.assertEqual(self.client.get("/api/usuarios", headers=other).status_code, 403)
+        users = self.client.get("/api/usuarios", headers=self.admin).json
+        self.assertEqual(len(users), 2)
+        self.assertNotIn("password_hash", users[0])
+        project = self.client.post("/api/proyectos", headers=self.admin, json={"nombre": "Trabajo", "color": "#123456"}).json
+        self.assertEqual(self.client.get("/api/proyectos", headers=other).json[0]["nombre"], "Trabajo")
+        self.assertEqual(self.client.get("/api/tipos-fecha", headers=other).json[0]["nombre"], "Festivo")
+        self.assertEqual(self.client.post("/api/new_year", headers=other, json={"year": 2026}).status_code, 201)
+        self.assertEqual(self.client.post("/api/asignaciones", headers=self.admin, json={
+            "fecha": "2026-03-01", "proyecto_id": project["proyecto_id"], "es_prevision": False,
+        }).status_code, 201)
+        calendar = self.client.get("/api/calendario/2026", headers=self.admin).json
+        self.assertEqual(len(calendar["asignaciones"]), 1)
+        self.assertEqual(calendar["asignaciones"][0]["fecha"], "2026-03-01")
+        self.assertEqual(calendar["tipados"], [])
+        other_calendar = self.client.get("/api/calendario/2026", headers=other).json
+        self.assertEqual(other_calendar["asignaciones"], [])
+        self.assertEqual(other_calendar["tipados"][0]["nombre"], "Festivo")
+        self.assertEqual(self.client.get("/api/calendario/2027", headers=other).json, {"asignaciones": [], "tipados": []})
+        self.assertEqual(self.client.get("/api/calendario/10000", headers=other).status_code, 400)
+
 
 if __name__ == "__main__":
     unittest.main()

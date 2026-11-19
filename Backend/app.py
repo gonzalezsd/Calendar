@@ -117,6 +117,22 @@ def create_app(test_config=None):
         token = serializer().dumps({"usuario_id": user["usuario_id"], "version": user["version"]})
         return jsonify(access_token=token, token_type="Bearer", expires_in=3600)
 
+    @app.get("/api/me")
+    @authenticated()
+    def current_user():
+        return jsonify(g.user)
+
+    @app.get("/api/usuarios")
+    @authenticated(admin=True)
+    def list_users():
+        rows = get_db().execute(
+            """SELECT u.usuario_id, u.nombre, u.apellido1, u.apellido2,
+                      u.es_administrador, u.activo, c.nombre_usuario
+               FROM usuarios u LEFT JOIN credenciales c USING (usuario_id)
+               ORDER BY u.usuario_id"""
+        ).fetchall()
+        return jsonify(rows)
+
     @app.post("/api/usuarios")
     @authenticated(admin=True)
     def create_user():
@@ -179,6 +195,11 @@ def create_app(test_config=None):
             result = insert("proyectos", values)
         return jsonify(result), 201
 
+    @app.get("/api/proyectos")
+    @authenticated()
+    def list_projects():
+        return jsonify(get_db().execute("SELECT * FROM proyectos ORDER BY proyecto_id").fetchall())
+
     @app.patch("/api/proyectos/<int:project_id>")
     @authenticated()
     def update_project(project_id):
@@ -197,6 +218,11 @@ def create_app(test_config=None):
         with get_db().transaction():
             result = insert("tipos_fecha", values)
         return jsonify(result), 201
+
+    @app.get("/api/tipos-fecha")
+    @authenticated()
+    def list_date_types():
+        return jsonify(get_db().execute("SELECT * FROM tipos_fecha ORDER BY tipo_id").fetchall())
 
     @app.patch("/api/tipos-fecha/<int:type_id>")
     @authenticated()
@@ -277,6 +303,30 @@ def create_app(test_config=None):
             (g.user["usuario_id"], g.user["usuario_id"]),
         ).fetchall()
         return jsonify(years=[row["year"] for row in rows])
+
+    @app.get("/api/calendario/<int:year>")
+    @authenticated()
+    def get_calendar(year):
+        if not 1 <= year <= 9999:
+            raise APIError("year debe ser un entero entre 1 y 9999", 400)
+        db = get_db()
+        assignments = db.execute(
+            """SELECT a.fecha, a.proyecto_id, a.es_prevision, p.nombre, p.color
+               FROM asignaciones a JOIN proyectos p USING (proyecto_id)
+               WHERE a.usuario_id = %s AND EXTRACT(YEAR FROM a.fecha) = %s
+               ORDER BY a.fecha, a.proyecto_id, a.es_prevision""",
+            (g.user["usuario_id"], year),
+        ).fetchall()
+        typings = db.execute(
+            """SELECT t.fecha, t.tipo_id, tf.nombre, tf.color, tf.en_borde
+               FROM tipados t JOIN tipos_fecha tf USING (tipo_id)
+               WHERE t.usuario_id = %s AND EXTRACT(YEAR FROM t.fecha) = %s
+               ORDER BY t.fecha, t.tipo_id""",
+            (g.user["usuario_id"], year),
+        ).fetchall()
+        for row in assignments + typings:
+            row["fecha"] = row["fecha"].isoformat()
+        return jsonify(asignaciones=assignments, tipados=typings)
 
     @app.post("/api/new_year")
     @authenticated()
