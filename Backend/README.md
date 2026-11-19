@@ -18,13 +18,30 @@ al usuario autenticado. Los proyectos y tipos de fecha son compartidos.
    pip install -r requirements.txt
    ```
 
-3. Configura `DATABASE_URL` con una cadena de conexión PostgreSQL y `SECRET_KEY`
-   con un secreto aleatorio privado de al menos 32 caracteres. El rol de la base
-   de datos debe poder leer y modificar las tablas y usar las secuencias. Para
-   navegadores en otro origen, configura `CORS_ORIGINS` con los orígenes
-   permitidos separados por comas, por ejemplo `https://app.example.com`.
-   Sin esta variable no se habilita CORS; los clientes no sujetos a la política
-   de mismo origen del navegador no la necesitan.
+3. Desde `Backend`, crea el fichero de configuración privado:
+
+   ```sh
+   cp config.example.json config.json
+   chmod 600 config.json
+   ```
+
+   Edita `config.json` y establece `DATABASE_URL` con una cadena de conexión
+   PostgreSQL y `SECRET_KEY` con un secreto aleatorio privado de al menos 32
+   caracteres. Por ejemplo, la conexión puede tener la forma
+   `postgresql://usuario:contraseña@localhost:5432/calendar`; codifica los
+   caracteres especiales de las credenciales para utilizarlos en una URL.
+   Puedes generar una clave con `python -c "import secrets; print(secrets.token_hex(32))"`.
+   Conserva la misma clave entre reinicios para no invalidar los tokens activos.
+   El rol de la base de datos debe poder leer y modificar las tablas y usar las
+   secuencias. Para navegadores en otro origen, configura `CORS_ORIGINS` como
+   cadena de orígenes separados por comas, por ejemplo `https://app.example.com`.
+   Una cadena vacía deshabilita CORS. `TEST_DATABASE_URL` solo se usa para las
+   pruebas y puede dejarse vacío.
+
+   `config.json` está excluido de Git; no compartas ni subas sus credenciales.
+   El backend lee este fichero desde su propia carpeta, independientemente del
+   directorio desde el que se arranque, y no utiliza variables de entorno para
+   estas opciones.
 4. Crea el primer administrador de forma interactiva y arranca la aplicación:
 
    ```sh
@@ -97,10 +114,11 @@ correspondiente.
 
 ## Pruebas
 
-Usa una base de datos PostgreSQL **de pruebas** y un rol con permiso para crear
-esquemas. Las pruebas crean y eliminan únicamente su propio esquema temporal:
+Configura `TEST_DATABASE_URL` en `config.json` con la conexión a una base de
+datos PostgreSQL **de pruebas** y un rol con permiso para crear esquemas. Las
+pruebas crean y eliminan únicamente su propio esquema temporal. Si no se
+configura, se omiten las pruebas de integración:
 
 ```sh
-export TEST_DATABASE_URL='postgresql://usuario:contraseña@localhost/base_de_pruebas'
 python -m unittest discover -s tests -v
 ```

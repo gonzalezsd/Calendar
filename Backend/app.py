@@ -1,8 +1,9 @@
-import os
+import json
 import re
 from datetime import date
 from functools import wraps
 from getpass import getpass
+from pathlib import Path
 
 import click
 import psycopg
@@ -21,19 +22,40 @@ class APIError(Exception):
         self.status = status
 
 
+CONFIG_PATH = Path(__file__).resolve().with_name("config.json")
+
+
+def load_config(path):
+    try:
+        with path.open(encoding="utf-8") as config_file:
+            config = json.load(config_file)
+    except FileNotFoundError as error:
+        raise RuntimeError(f"No existe {path}; crea el fichero a partir de config.example.json") from error
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f"El fichero {path} no contiene JSON válido") from error
+    except UnicodeDecodeError as error:
+        raise RuntimeError(f"El fichero {path} debe estar codificado en UTF-8") from error
+    except OSError as error:
+        raise RuntimeError(f"No se puede leer el fichero de configuración {path}") from error
+    if not isinstance(config, dict):
+        raise RuntimeError(f"El fichero {path} debe contener un objeto JSON")
+    return config
+
+
 def create_app(test_config=None):
     app = Flask(__name__)
     app.config.from_mapping(
-        DATABASE_URL=os.environ.get("DATABASE_URL"),
-        SECRET_KEY=os.environ.get("SECRET_KEY"),
-        CORS_ORIGINS=os.environ.get("CORS_ORIGINS", ""),
+        DATABASE_URL=None,
+        SECRET_KEY=None,
+        CORS_ORIGINS="",
     )
-    if test_config:
-        app.config.update(test_config)
-    if not app.config["DATABASE_URL"]:
-        raise RuntimeError("DATABASE_URL es obligatorio")
-    if not app.config["SECRET_KEY"] or len(app.config["SECRET_KEY"]) < 32:
+    app.config.update(load_config(CONFIG_PATH) if test_config is None else test_config)
+    if not isinstance(app.config["DATABASE_URL"], str) or not app.config["DATABASE_URL"].strip():
+        raise RuntimeError("DATABASE_URL debe ser una cadena de conexión no vacía")
+    if not isinstance(app.config["SECRET_KEY"], str) or len(app.config["SECRET_KEY"]) < 32:
         raise RuntimeError("SECRET_KEY debe contener al menos 32 caracteres")
+    if not isinstance(app.config["CORS_ORIGINS"], str):
+        raise RuntimeError("CORS_ORIGINS debe ser una cadena de orígenes separados por comas")
     origins = [origin.strip() for origin in app.config["CORS_ORIGINS"].split(",") if origin.strip()]
     if origins:
         CORS(app, resources={r"/api/*": {"origins": origins}})

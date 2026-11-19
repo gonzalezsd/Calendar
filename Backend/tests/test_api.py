@@ -1,4 +1,3 @@
-import os
 import unittest
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -9,14 +8,16 @@ import psycopg
 from psycopg import sql
 from psycopg.conninfo import make_conninfo
 
-from app import create_app
+from app import CONFIG_PATH, create_app, load_config
 
 
 ROOT = Path(__file__).resolve().parents[2]
-TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL")
+TEST_DATABASE_URL = load_config(CONFIG_PATH).get("TEST_DATABASE_URL") if CONFIG_PATH.exists() else None
+if TEST_DATABASE_URL is not None and not isinstance(TEST_DATABASE_URL, str):
+    raise RuntimeError("TEST_DATABASE_URL debe ser una cadena de conexión")
 
 
-@unittest.skipUnless(TEST_DATABASE_URL, "TEST_DATABASE_URL no está configurado")
+@unittest.skipUnless(TEST_DATABASE_URL, "TEST_DATABASE_URL no está configurado en config.json")
 class APITests(unittest.TestCase):
     def setUp(self):
         self.schema = "calendar_test_" + uuid.uuid4().hex

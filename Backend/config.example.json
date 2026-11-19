@@ -1,0 +1,6 @@
+{
+  "DATABASE_URL": "",
+  "SECRET_KEY": "",
+  "CORS_ORIGINS": "",
+  "TEST_DATABASE_URL": ""
+}
