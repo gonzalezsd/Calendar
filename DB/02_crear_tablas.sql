@@ -3,7 +3,15 @@ CREATE TABLE usuarios (
     nombre varchar(255),
     apellido1 varchar(255),
     apellido2 varchar(255),
-    es_administrador boolean
+    es_administrador boolean,
+    activo boolean
+);
+
+CREATE TABLE credenciales (
+    usuario_id integer PRIMARY KEY REFERENCES usuarios (usuario_id),
+    nombre_usuario varchar(255) NOT NULL UNIQUE,
+    password_hash text NOT NULL,
+    version integer NOT NULL DEFAULT 1
 );
 
 CREATE TABLE proyectos (
@@ -16,9 +24,11 @@ CREATE TABLE proyectos (
 );
 
 CREATE TABLE asignaciones (
-    fecha date,
-    proyecto_id integer REFERENCES proyectos (proyecto_id),
-    es_prevision boolean
+    fecha date NOT NULL,
+    proyecto_id integer NOT NULL REFERENCES proyectos (proyecto_id),
+    es_prevision boolean NOT NULL,
+    usuario_id integer NOT NULL REFERENCES usuarios (usuario_id),
+    CONSTRAINT asignaciones_unicas UNIQUE (usuario_id, fecha, proyecto_id, es_prevision)
 );
 
 CREATE TABLE tipos_fecha (
@@ -29,7 +39,12 @@ CREATE TABLE tipos_fecha (
     en_borde boolean
 );
 
+CREATE UNIQUE INDEX tipos_fecha_festivo_unico ON tipos_fecha (nombre)
+    WHERE nombre = 'Festivo';
+
 CREATE TABLE tipados (
-    fecha date,
-    tipo_id integer REFERENCES tipos_fecha (tipo_id)
+    fecha date NOT NULL,
+    tipo_id integer NOT NULL REFERENCES tipos_fecha (tipo_id),
+    usuario_id integer NOT NULL REFERENCES usuarios (usuario_id),
+    CONSTRAINT tipados_unicos UNIQUE (usuario_id, fecha, tipo_id)
 );
