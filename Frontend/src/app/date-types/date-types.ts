@@ -16,8 +16,13 @@ export class DateTypesComponent implements OnInit {
   constructor(readonly state: AppState) {}
 
   async ngOnInit(): Promise<void> {
+    const target = this.state.editTarget?.view === 'tipos' ? this.state.editTarget.id : null;
+    this.state.editTarget = null;
     await this.state.run(async () => {
       this.dateTypes = await this.state.request<DateType[]>('GET', '/api/tipos-fecha');
+      const type = this.dateTypes.find(item => item.tipo_id === target);
+      if (type) this.editType(type);
+      else if (target !== null) this.state.error = 'El tipo de fecha ya no está disponible.';
     });
   }
 

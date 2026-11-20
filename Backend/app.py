@@ -33,8 +33,6 @@ def load_config(path):
         raise RuntimeError(f"No existe {path}; crea el fichero a partir de config.example.json") from error
     except json.JSONDecodeError as error:
         raise RuntimeError(f"El fichero {path} no contiene JSON válido") from error
-    except UnicodeDecodeError as error:
-        raise RuntimeError(f"El fichero {path} debe estar codificado en UTF-8") from error
     except OSError as error:
         raise RuntimeError(f"No se puede leer el fichero de configuración {path}") from error
     if not isinstance(config, dict):
@@ -269,6 +267,57 @@ def create_app(test_config=None):
             result = update("tipos_fecha", "tipo_id", type_id, values)
         return jsonify(result)
 
+    @app.post("/api/asignaciones/multiples")
+    @authenticated()
+    def create_multiple_assignments():
+        fields = {"fechas", "proyectos", "tipos", "es_prevision"}
+        data = body(fields, fields)
+        if not isinstance(data["fechas"], list) or not isinstance(data["proyectos"], list) or not isinstance(data["tipos"], list):
+            raise APIError("fechas, proyectos y tipos deben ser listas", 400)
+        days = [valid_date(value) for value in data["fechas"]]
+        projects = [positive_id(value) for value in data["proyectos"]]
+        types = [positive_id(value) for value in data["tipos"]]
+        if len(days) < 2 or len(set(days)) != len(days) or len({day.year for day in days}) != 1:
+            raise APIError("Selecciona al menos dos fechas distintas del mismo año", 400)
+        if len(set(projects)) != len(projects) or len(set(types)) != len(types):
+            raise APIError("Los proyectos y tipos no pueden repetirse", 400)
+        if not projects and not types:
+            raise APIError("Selecciona al menos un proyecto o tipo de fecha", 400)
+        if type(data["es_prevision"]) is not bool:
+            raise APIError("es_prevision debe ser booleano", 400)
+
+        db = get_db()
+        with db.transaction():
+            existing_types = db.execute(
+                "SELECT tipo_id FROM tipos_fecha WHERE tipo_id = ANY(%s) ORDER BY tipo_id FOR SHARE", (types,)
+            ).fetchall()
+            if len(existing_types) != len(types):
+                raise APIError("Tipo de fecha no encontrado", 404)
+            existing_projects = db.execute(
+                "SELECT proyecto_id FROM proyectos WHERE proyecto_id = ANY(%s) ORDER BY proyecto_id FOR KEY SHARE",
+                (projects,),
+            ).fetchall()
+            if len(existing_projects) != len(projects):
+                raise APIError("Proyecto no encontrado", 404)
+            db.execute("SELECT usuario_id FROM usuarios WHERE usuario_id = %s FOR UPDATE", (g.user["usuario_id"],))
+            for day in sorted(days):
+                for project_id in sorted(projects):
+                    inserted = db.execute(
+                        """INSERT INTO asignaciones (usuario_id, fecha, proyecto_id, es_prevision)
+                           VALUES (%s, %s, %s, %s)
+                           ON CONFLICT (usuario_id, fecha, proyecto_id, es_prevision) DO NOTHING
+                           RETURNING proyecto_id""",
+                        (g.user["usuario_id"], day, project_id, data["es_prevision"]),
+                    ).fetchone()
+                    if not inserted:
+                        raise APIError(f"{day.isoformat()}: el proyecto {project_id} ya está asignado", 409)
+                for type_id in sorted(types):
+                    try:
+                        insert_typing(db, day, type_id)
+                    except APIError as error:
+                        raise APIError(f"{day.isoformat()}: {error.message}", error.status) from error
+        return jsonify(fechas=len(days), asignaciones=len(days) * len(projects), tipados=len(days) * len(types)), 201
+
     @app.post("/api/asignaciones")
     @authenticated()
     def create_assignment():
@@ -285,6 +334,28 @@ def create_app(test_config=None):
             ).fetchone()
         result["fecha"] = result["fecha"].isoformat()
         return jsonify(result), 201
+
+    @app.post("/api/asignaciones/<day>/<int:project_id>/confirmar")
+    @authenticated()
+    def confirm_assignment(day, project_id):
+        day = valid_date(day)
+        positive_id(project_id)
+        db = get_db()
+        with db.transaction():
+            row = db.execute(
+                """DELETE FROM asignaciones WHERE usuario_id = %s AND fecha = %s
+                   AND proyecto_id = %s AND es_prevision = true RETURNING usuario_id""",
+                (g.user["usuario_id"], day, project_id),
+            ).fetchone()
+            if not row:
+                raise APIError("Previsión no encontrada", 404)
+            db.execute(
+                """INSERT INTO asignaciones (usuario_id, fecha, proyecto_id, es_prevision)
+                   VALUES (%s, %s, %s, false)
+                   ON CONFLICT (usuario_id, fecha, proyecto_id, es_prevision) DO NOTHING""",
+                (g.user["usuario_id"], day, project_id),
+            )
+        return jsonify(usuario_id=g.user["usuario_id"], fecha=day.isoformat(), proyecto_id=project_id, es_prevision=False)
 
     @app.delete("/api/asignaciones/<day>/<int:project_id>/<forecast>")
     @authenticated()
@@ -333,7 +404,7 @@ def create_app(test_config=None):
             raise APIError("year debe ser un entero entre 1 y 9999", 400)
         db = get_db()
         assignments = db.execute(
-            """SELECT a.fecha, a.proyecto_id, a.es_prevision, p.nombre, p.color
+            """SELECT a.fecha, a.proyecto_id, a.es_prevision, p.nombre, p.color, p.laborable
                FROM asignaciones a JOIN proyectos p USING (proyecto_id)
                WHERE a.usuario_id = %s AND EXTRACT(YEAR FROM a.fecha) = %s
                ORDER BY a.fecha, a.proyecto_id, a.es_prevision""",
@@ -385,9 +456,9 @@ def create_app(test_config=None):
 
 
 USER_FIELDS = {"nombre", "apellido1", "apellido2", "es_administrador", "activo"}
-PROJECT_FIELDS = {"nombre", "descripcion", "duracion", "restantes", "color"}
+PROJECT_FIELDS = {"nombre", "descripcion", "duracion", "restantes", "color", "laborable"}
 TYPE_FIELDS = {"nombre", "descripcion", "color", "en_borde"}
-BOOLEAN_FIELDS = {"es_administrador", "activo", "en_borde"}
+BOOLEAN_FIELDS = {"es_administrador", "activo", "en_borde", "laborable"}
 TEXT_FIELDS = {"nombre", "apellido1", "apellido2", "descripcion", "color"}
 
 

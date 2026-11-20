@@ -28,6 +28,7 @@ class APITests(unittest.TestCase):
         with psycopg.connect(self.url, autocommit=True) as db:
             db.execute((ROOT / "DB/02_crear_tablas.sql").read_text())
             db.execute((ROOT / "DB/03_crear_tipo_festivo.sql").read_text())
+            db.execute((ROOT / "DB/04_crear_proyecto_vacaciones.sql").read_text())
         self.app = create_app({"TESTING": True, "DATABASE_URL": self.url, "SECRET_KEY": "test-key-" * 5})
         with patch("app.getpass", side_effect=["password123", "password123"]):
             result = self.app.test_cli_runner().invoke(
@@ -85,6 +86,112 @@ class APITests(unittest.TestCase):
         self.assertEqual(self.client.post("/api/asignaciones", headers=other, json=assignment).status_code, 201)
         self.assertEqual(self.client.delete(path, headers=other).status_code, 204)
         self.assertEqual(self.client.delete(path, headers=self.admin).status_code, 204)
+
+    def test_confirm_forecast_and_merge_existing_assignment(self):
+        project = self.client.post("/api/proyectos", headers=self.admin, json={"nombre": "Proyecto"})
+        project_id = project.json["proyecto_id"]
+        self.create_user("other")
+        other = self.login("other", "password123")
+        assignment = {"fecha": "2026-01-02", "proyecto_id": project_id, "es_prevision": True}
+        for token in (self.admin, other):
+            self.assertEqual(self.client.post("/api/asignaciones", headers=token, json=assignment).status_code, 201)
+        url = f"/api/asignaciones/2026-01-02/{project_id}/confirmar"
+        confirmed = self.client.post(url, headers=self.admin)
+        self.assertEqual(confirmed.status_code, 200, confirmed.json)
+        self.assertEqual(confirmed.json["es_prevision"], False)
+        calendar = self.client.get("/api/calendario/2026", headers=self.admin).json
+        self.assertEqual([item["es_prevision"] for item in calendar["asignaciones"]], [False])
+        other_calendar = self.client.get("/api/calendario/2026", headers=other).json
+        self.assertEqual([item["es_prevision"] for item in other_calendar["asignaciones"]], [True])
+        self.assertEqual(self.client.post(url, headers=self.admin).status_code, 404)
+
+        self.assertEqual(self.client.post("/api/asignaciones", headers=self.admin, json=assignment).status_code, 201)
+        self.assertEqual(self.client.post(url, headers=self.admin).status_code, 200)
+        calendar = self.client.get("/api/calendario/2026", headers=self.admin).json
+        self.assertEqual([item["es_prevision"] for item in calendar["asignaciones"]], [False])
+        self.assertEqual(self.client.post(f"/api/asignaciones/2026-02-30/{project_id}/confirmar", headers=self.admin).status_code, 400)
+        self.assertEqual(self.client.post(url).status_code, 401)
+
+    def test_multiple_assignments(self):
+        project_ids = [
+            self.client.post("/api/proyectos", headers=self.admin, json={"nombre": name}).json["proyecto_id"]
+            for name in ("Uno", "Dos")
+        ]
+        type_ids = [
+            self.client.post("/api/tipos-fecha", headers=self.admin, json={"en_borde": border}).json["tipo_id"]
+            for border in (True, False)
+        ]
+        payload = {
+            "fechas": ["2026-01-02", "2026-01-03"],
+            "proyectos": project_ids,
+            "tipos": type_ids,
+            "es_prevision": True,
+        }
+        response = self.client.post("/api/asignaciones/multiples", headers=self.admin, json=payload)
+        self.assertEqual(response.status_code, 201, response.json)
+        self.assertEqual(response.json, {"fechas": 2, "asignaciones": 4, "tipados": 4})
+        calendar = self.client.get("/api/calendario/2026", headers=self.admin).json
+        self.assertEqual(len(calendar["asignaciones"]), 4)
+        self.assertTrue(all(item["es_prevision"] for item in calendar["asignaciones"]))
+        self.assertEqual(len(calendar["tipados"]), 4)
+        self.create_user("other")
+        other = self.login("other", "password123")
+        self.assertEqual(self.client.get("/api/calendario/2026", headers=other).json, {"asignaciones": [], "tipados": []})
+        self.assertEqual(self.client.post("/api/asignaciones/multiples", json=payload).status_code, 401)
+        for invalid in (
+            {**payload, "fechas": ["2026-01-02"]},
+            {**payload, "fechas": ["2026-01-02", "2027-01-02"]},
+            {**payload, "proyectos": [], "tipos": []},
+            {**payload, "proyectos": [project_ids[0], project_ids[0]]},
+            {**payload, "es_prevision": 1},
+        ):
+            with self.subTest(payload=invalid):
+                self.assertEqual(self.client.post("/api/asignaciones/multiples", headers=self.admin, json=invalid).status_code, 400)
+
+    def test_multiple_assignments_roll_back_on_conflict(self):
+        project_id = self.client.post("/api/proyectos", headers=self.admin, json={"nombre": "Proyecto"}).json["proyecto_id"]
+        type_id = self.client.post("/api/tipos-fecha", headers=self.admin, json={"en_borde": True}).json["tipo_id"]
+        existing_type = self.client.post("/api/tipos-fecha", headers=self.admin, json={"en_borde": True}).json["tipo_id"]
+        payload = {
+            "fechas": ["2026-02-01", "2026-02-02"],
+            "proyectos": [project_id],
+            "tipos": [type_id],
+            "es_prevision": False,
+        }
+        existing = {"fecha": "2026-02-02", "proyecto_id": project_id, "es_prevision": False}
+        self.assertEqual(self.client.post("/api/asignaciones", headers=self.admin, json=existing).status_code, 201)
+        conflict = self.client.post("/api/asignaciones/multiples", headers=self.admin, json=payload)
+        self.assertEqual(conflict.status_code, 409, conflict.json)
+        self.assertIn("2026-02-02", conflict.json["error"])
+        calendar = self.client.get("/api/calendario/2026", headers=self.admin).json
+        self.assertEqual(len(calendar["asignaciones"]), 1)
+        self.assertEqual(calendar["tipados"], [])
+
+        self.assertEqual(self.client.delete(f"/api/asignaciones/2026-02-02/{project_id}/false", headers=self.admin).status_code, 204)
+        self.assertEqual(self.client.post("/api/tipados", headers=self.admin, json={"fecha": "2026-02-02", "tipo_id": existing_type}).status_code, 201)
+        conflict = self.client.post("/api/asignaciones/multiples", headers=self.admin, json=payload)
+        self.assertEqual(conflict.status_code, 409, conflict.json)
+        self.assertIn("2026-02-02", conflict.json["error"])
+        calendar = self.client.get("/api/calendario/2026", headers=self.admin).json
+        self.assertEqual(calendar["asignaciones"], [])
+        self.assertEqual(len(calendar["tipados"]), 1)
+
+    def test_multiple_assignments_serialize_with_single_typing(self):
+        ids = [
+            self.client.post("/api/tipos-fecha", headers=self.admin, json={"en_borde": True}).json["tipo_id"]
+            for _ in range(2)
+        ]
+        def assign(bulk):
+            with self.app.test_client() as client:
+                if bulk:
+                    return client.post("/api/asignaciones/multiples", headers=self.admin, json={
+                        "fechas": ["2026-03-01", "2026-03-02"], "proyectos": [], "tipos": [ids[0]], "es_prevision": False
+                    }).status_code
+                return client.post("/api/tipados", headers=self.admin, json={"fecha": "2026-03-01", "tipo_id": ids[1]}).status_code
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            self.assertEqual(sorted(executor.map(assign, (True, False))), [201, 409])
+        calendar = self.client.get("/api/calendario/2026", headers=self.admin).json
+        self.assertEqual(sum(item["fecha"] == "2026-03-01" for item in calendar["tipados"]), 1)
 
     def test_typing_rules_and_type_changes(self):
         def create_type(border):
@@ -168,6 +275,32 @@ class APITests(unittest.TestCase):
             401,
         )
 
+    def test_project_laborable(self):
+        created = self.client.post("/api/proyectos", headers=self.admin, json={"nombre": "Trabajo"})
+        self.assertEqual(created.status_code, 201, created.json)
+        self.assertIs(created.json["laborable"], True)
+        project_id = created.json["proyecto_id"]
+
+        updated = self.client.patch(f"/api/proyectos/{project_id}", headers=self.admin, json={"laborable": False})
+        self.assertEqual(updated.status_code, 200, updated.json)
+        self.assertIs(updated.json["laborable"], False)
+        projects = self.client.get("/api/proyectos", headers=self.admin).json
+        self.assertIs(next(p for p in projects if p["proyecto_id"] == project_id)["laborable"], False)
+        assignment = {"fecha": "2026-01-02", "proyecto_id": project_id, "es_prevision": False}
+        self.assertEqual(self.client.post("/api/asignaciones", headers=self.admin, json=assignment).status_code, 201)
+        calendar = self.client.get("/api/calendario/2026", headers=self.admin).json
+        self.assertIs(calendar["asignaciones"][0]["laborable"], False)
+
+        created = self.client.post("/api/proyectos", headers=self.admin, json={"nombre": "Otro", "laborable": False})
+        self.assertEqual(created.status_code, 201, created.json)
+        self.assertIs(created.json["laborable"], False)
+        for invalid in (None, 0, "true"):
+            with self.subTest(laborable=invalid):
+                self.assertEqual(
+                    self.client.patch(f"/api/proyectos/{project_id}", headers=self.admin, json={"laborable": invalid}).status_code,
+                    400,
+                )
+
     def test_creation_schema_enforces_calendar_constraints(self):
         with psycopg.connect(self.url, autocommit=True) as db:
             for statement in (
@@ -224,6 +357,14 @@ class APITests(unittest.TestCase):
                 db.execute(seed)
             db.execute("ROLLBACK")
             self.assertEqual(db.execute("SELECT count(*) FROM tipos_fecha WHERE nombre = 'Festivo'").fetchone()[0], 2)
+
+    def test_vacaciones_project_seed(self):
+        with psycopg.connect(self.url, autocommit=True) as db:
+            db.execute((ROOT / "DB/04_crear_proyecto_vacaciones.sql").read_text())
+            project = db.execute(
+                "SELECT nombre, duracion, restantes, color FROM proyectos WHERE nombre = 'Vacaciones'"
+            ).fetchone()
+        self.assertEqual(project, ("Vacaciones", None, None, "#FF7800"))
 
     def test_years_are_unique_sorted_and_private(self):
         self.create_user("other")

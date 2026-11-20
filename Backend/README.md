@@ -80,6 +80,8 @@ usuario impide su uso. No son tokens JWT.
 | `GET /api/tipos-fecha` | Lista de tipos de fecha compartidos |
 | `PATCH /api/tipos-fecha/{tipo_id}` | Campos de tipo de fecha a modificar |
 | `POST /api/asignaciones` | `fecha`, `proyecto_id`, `es_prevision` |
+| `POST /api/asignaciones/multiples` | `fechas` (lista de fechas), `proyectos` y `tipos` (listas de identificadores), `es_prevision` |
+| `POST /api/asignaciones/{fecha}/{proyecto_id}/confirmar` | Confirma una previsión del usuario autenticado |
 | `DELETE /api/asignaciones/{fecha}/{proyecto_id}/{es_prevision}` | `es_prevision` es `true` o `false` |
 | `POST /api/tipados` | `fecha`, `tipo_id` |
 | `DELETE /api/tipados/{fecha}/{tipo_id}` | Elimina el tipado del usuario autenticado |
@@ -93,12 +95,24 @@ puede hacerlos cualquier usuario activo. En las creaciones de usuario,
 y `es_administrador` en `false` si se omiten. Las contraseñas deben tener entre
 8 y 1024 caracteres y se almacenan como hashes.
 
+Los proyectos tienen un campo booleano `laborable`, que por defecto es `true`.
+También se incluye en las asignaciones devueltas por el calendario.
+
 Las fechas usan `AAAA-MM-DD`; los colores, `#RRGGBB`. Cada usuario puede asignar
 varios proyectos a una fecha, pero no repetir la misma combinación de fecha,
 proyecto y previsión. Por fecha y usuario se admite un tipo con `en_borde=true`
 y otro con `en_borde=false`. No se puede cambiar `en_borde` mientras el tipo
 esté asignado. Los cambios de tipados deben hacerse a través de la API para
 respetar esta regla.
+
+Al confirmar una previsión se convierte en asignación confirmada. Si esta ya
+existía para el mismo día y proyecto, se elimina la previsión y se conserva la
+asignación confirmada. Si no existe la previsión, la API devuelve 404.
+La asignación múltiple acepta al menos dos fechas distintas del mismo año y uno
+o más proyectos o tipos; `es_prevision` se aplica a todos los proyectos. Si
+alguna asignación ya existe o un tipo entra en conflicto, devuelve 409 y no
+guarda ninguna. Devuelve 201 con las cantidades de fechas, asignaciones y
+tipados creados.
 
 El tipo básico `Festivo` se crea con el script de datos de `DB`, con color
 `#FF0000` y `en_borde=false`. Su nombre está reservado y no se puede cambiar

@@ -19,6 +19,7 @@ export class AppState {
   error = '';
   message = '';
   view: View = 'calendar';
+  editTarget: { view: 'proyectos' | 'tipos'; id: number } | null = null;
   menuOpen = false;
   years: number[] = [];
   year: number | null = null;
@@ -74,6 +75,7 @@ export class AppState {
     this.calendar = [];
     this.calendarLoading = false;
     this.view = 'calendar';
+    this.editTarget = null;
     this.menuOpen = false;
   }
 

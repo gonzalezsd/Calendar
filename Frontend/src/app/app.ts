@@ -14,6 +14,7 @@ import { DateTypesComponent } from './date-types/date-types';
   styleUrl: './app.css'
 })
 export class App implements OnInit {
+  @ViewChild(CalendarComponent) calendar?: CalendarComponent;
   @ViewChild(UsersComponent) private users?: UsersComponent;
   @ViewChild(ProjectsComponent) private projects?: ProjectsComponent;
   @ViewChild(DateTypesComponent) private dateTypes?: DateTypesComponent;
@@ -26,6 +27,7 @@ export class App implements OnInit {
 
   navigate(view: View): void {
     this.state.menuOpen = false;
+    if (view === 'calendar') this.calendar?.showYear();
     if (this.state.view === view) {
       const current = view === 'usuarios' ? this.users :
         view === 'proyectos' ? this.projects : view === 'tipos' ? this.dateTypes : undefined;

@@ -1,8 +1,12 @@
 <div class="section-heading">
   <div>
     <p class="eyebrow">TU AÑO DE UN VISTAZO</p>
-    <h2>Calendario anual</h2>
+    <h2>{{ selectedMonth === null ? 'Calendario anual' : 'Calendario mensual' }}</h2>
     <p class="muted">Consulta tus proyectos y fechas señaladas.</p>
+    <p class="muted">Mantén Mayús al pulsar para seleccionar varios días sin abrir el detalle.</p>
+    @if (selectedMonth !== null) {
+      <button type="button" class="secondary" (click)="showYear()">Ver todo el año</button>
+    }
   </div>
   <form #yearForm="ngForm" class="create-year" (ngSubmit)="createYear(yearForm)">
     <label for="new-year">Nuevo año</label>
@@ -14,34 +18,204 @@
   <p class="empty-state" role="status">Cargando calendario…</p>
 } @else if (state.year === null) {
   <div class="empty-state"><strong>Aún no hay años disponibles.</strong><p>Crea un año para empezar.</p></div>
+} @else if (!state.calendar.length) {
+  <div class="empty-state"><p>No se ha podido cargar el calendario.</p>
+    <button type="button" class="secondary" [disabled]="state.loading" (click)="reloadCalendar()">Reintentar</button>
+  </div>
 } @else if (state.calendar.length) {
-  <div class="calendar-grid">
-    @for (month of state.calendar; track month.name) {
-      <section class="month-card" [attr.aria-label]="month.name + ' ' + state.year">
-        <h3>{{ month.name }}</h3>
-        <div class="month-grid">
-          @for (weekday of weekdays; track $index) { <span class="weekday">{{ weekday }}</span> }
-          @for (day of month.days; track $index) {
-            @if (day) {
-              <div class="day" [attr.aria-label]="day.date">
-                <span class="day-number">{{ day.number }}</span>
-                @for (typing of day.typings; track typing.tipo_id) {
-                  <span class="event" [style.border-left-color]="typing.color || '#9ca3af'"
-                        [title]="(typing.nombre || 'Tipo de fecha') + (typing.en_borde ? ' (borde)' : '')">
-                    {{ typing.nombre || 'Tipo de fecha' }}{{ typing.en_borde ? ' · borde' : '' }}
-                  </span>
-                }
-                @for (assignment of day.assignments; track assignment.proyecto_id + '-' + assignment.es_prevision) {
-                  <span class="event project-event" [style.border-left-color]="assignment.color || '#9ca3af'"
-                        [title]="(assignment.nombre || 'Proyecto') + (assignment.es_prevision ? ' (previsión)' : '')">
-                    {{ assignment.nombre || 'Proyecto' }}{{ assignment.es_prevision ? ' · prev.' : '' }}
-                  </span>
-                }
-              </div>
-            } @else { <span class="blank-day"></span> }
-          }
-        </div>
-      </section>
+  <div class="calendar-grid" [class.monthly-view]="selectedMonth !== null">
+    @for (month of state.calendar; track month.name; let monthIndex = $index) {
+      @if (selectedMonth === null || selectedMonth === monthIndex) {
+        <section class="month-card" [attr.aria-label]="month.name + ' ' + state.year">
+          <h3><button type="button" class="month-name" [attr.aria-label]="'Ver ' + month.name + ' ' + state.year"
+                      (click)="showMonth(monthIndex)">{{ month.name }}</button></h3>
+          <div class="month-grid">
+            @for (weekday of weekdays; track $index) { <span class="weekday">{{ weekday }}</span> }
+            @for (day of month.days; track $index) {
+              @if (day) {
+                <button type="button" class="day" [attr.aria-label]="day.date" [style.outline]="getTypingBorderStyle(day)"
+                     [attr.aria-pressed]="selectedDates.has(day.date)" [disabled]="state.loading" (click)="selectDay(day, $event)"
+                     [style.background-color]="getProjectBackground(day)"
+                     [style.outline-offset]="getTypingBorderStyle(day) ? '-2px' : null">
+                  <span class="day-number" [style.color]="getTypingNumberColor(day)">{{ day.number }}</span>
+                  @if (selectedDates.has(day.date)) { <span class="selection-mark" aria-hidden="true">✓</span> }
+                </button>
+              } @else { <span class="blank-day"></span> }
+            }
+          </div>
+        </section>
+      }
     }
   </div>
+}
+@if (bulkAssignOpen) {
+  <aside class="day-panel bulk-assign" id="bulk-assign-panel" aria-labelledby="bulk-assign-title">
+    <div class="day-panel-heading">
+      <div><p class="eyebrow">SELECCIÓN MÚLTIPLE</p><h2 id="bulk-assign-title">Asignar a {{ selectedDates.size }} días</h2></div>
+      <button #closeBulkButton type="button" class="secondary" (click)="closeBulkAssign()" aria-label="Cerrar asignación múltiple">Cerrar</button>
+    </div>
+    @if (state.error) { <p class="notice error" role="alert">{{ state.error }}</p> }
+    @if (state.loading && !catalogsLoaded) {
+      <p class="muted" role="status">Cargando opciones…</p>
+    } @else if (!catalogsLoaded) {
+      <button type="button" class="secondary" (click)="loadCatalogs()">Reintentar carga de opciones</button>
+    } @else {
+      <p class="muted">Si alguna asignación ya existe o entra en conflicto, no se guardará ninguna.</p>
+      <section aria-labelledby="bulk-projects-title">
+        <h3 id="bulk-projects-title">Proyectos</h3>
+        <div class="bulk-forecast">
+          <label class="check">
+            <input name="bulkForecast" type="checkbox" [(ngModel)]="bulkForecast" [disabled]="state.loading">
+            Asignar proyectos en previsión
+          </label>
+          <p class="muted">Se aplica a todos los proyectos seleccionados.</p>
+        </div>
+        @for (project of projects; track project.proyecto_id) {
+          <label class="check bulk-option">
+            <input name="bulkProject" type="checkbox" [checked]="bulkProjectIds.has(project.proyecto_id)" [disabled]="state.loading"
+                   (change)="toggleBulkSelection(bulkProjectIds, project.proyecto_id)">
+            {{ project.nombre || 'Sin nombre' }}
+          </label>
+        } @empty { <p class="muted">No hay proyectos.</p> }
+      </section>
+      <section aria-labelledby="bulk-types-title">
+        <h3 id="bulk-types-title">Tipos de fecha</h3>
+        @for (type of dateTypes; track type.tipo_id) {
+          <label class="check bulk-option">
+            <input type="checkbox" [checked]="bulkTypeIds.has(type.tipo_id)" [disabled]="state.loading || type.en_borde === null"
+                   (change)="toggleBulkSelection(bulkTypeIds, type.tipo_id)">
+            {{ type.nombre || 'Sin nombre' }}{{ type.en_borde ? ' · borde' : '' }}{{ type.en_borde === null ? ' · modalidad no definida' : '' }}
+          </label>
+        } @empty { <p class="muted">No hay tipos de fecha.</p> }
+      </section>
+      <button type="button" class="primary" [disabled]="state.loading || (!bulkProjectIds.size && !bulkTypeIds.size)"
+              (click)="assignSelectedDays()">Asignar</button>
+    }
+  </aside>
+}
+@if (annualInfoOpen) {
+  <aside class="day-panel annual-info" id="annual-info-panel" aria-labelledby="annual-info-title">
+    <div class="day-panel-heading">
+      <div><p class="eyebrow">RESUMEN DEL AÑO</p><h2 id="annual-info-title">Información anual {{ state.year ?? '' }}</h2></div>
+      <button #closeAnnualButton type="button" class="secondary" (click)="closeAnnualInfo()" aria-label="Cerrar información anual">Cerrar</button>
+    </div>
+    @if (state.error) { <p class="notice error" role="alert">{{ state.error }}</p> }
+    @if (state.calendarLoading || state.loading) {
+      <p class="muted" role="status">Cargando información anual…</p>
+    } @else if (state.year === null) {
+      <p class="muted">Selecciona un año para consultar su información.</p>
+    } @else if (!state.calendar.length) {
+      <p class="muted">No se ha podido cargar el calendario.</p>
+      <button type="button" class="secondary" (click)="reloadCalendar()">Reintentar</button>
+    } @else if (!catalogsLoaded) {
+      <button type="button" class="secondary" (click)="loadCatalogs()">Reintentar carga de opciones</button>
+    } @else {
+      @let summary = annualSummary;
+      <section aria-label="Días del año">
+        <p>Días laborables: <strong>{{ summary.workingDays }}</strong></p>
+        <p>Días trabajados: <strong>{{ summary.workedDays }}</strong></p>
+      </section>
+      <section aria-labelledby="annual-types-title">
+        <h3 id="annual-types-title">Tipos de fecha</h3>
+        @for (type of summary.types; track type.tipo_id) {
+          <div class="day-panel-item"><span>{{ type.nombre || 'Sin nombre' }}</span><strong>{{ type.days }} {{ type.days === 1 ? 'día' : 'días' }}</strong></div>
+        } @empty { <p class="muted">No hay tipos de fecha.</p> }
+      </section>
+      <section aria-labelledby="annual-projects-title">
+        <h3 id="annual-projects-title">Proyectos</h3>
+        @for (project of summary.projects; track project.proyecto_id) {
+          <div class="annual-project">
+            <strong>{{ project.nombre || 'Sin nombre' }}</strong>
+            <p>Duración inicial: {{ project.duracion ?? '—' }}</p>
+            <p>Días restantes: {{ project.restantes ?? '—' }}</p>
+            <p>Días asignados: {{ project.days }}</p>
+          </div>
+        } @empty { <p class="muted">No hay proyectos.</p> }
+      </section>
+    }
+  </aside>
+}
+@if (selectedDay; as day) {
+  <aside class="day-panel" aria-labelledby="day-panel-title">
+    <div class="day-panel-heading">
+      <div><p class="eyebrow">DETALLE DEL DÍA</p><h2 id="day-panel-title">{{ day.date }}</h2></div>
+      <button #closeDayButton type="button" class="secondary" (click)="closeDay()" aria-label="Cerrar detalle del día">Cerrar</button>
+    </div>
+    @if (state.error) { <p class="notice error" role="alert">{{ state.error }}</p> }
+    @if (state.message) { <p class="notice success" role="status">{{ state.message }}</p> }
+    @if (refreshFailed) {
+      <button type="button" class="secondary" [disabled]="state.loading" (click)="retryRefresh(day)">Reintentar actualización del calendario</button>
+    }
+    <section aria-labelledby="day-projects-title">
+      <h3 id="day-projects-title">Proyectos</h3>
+      @if (!day.assignments.length) { <p class="muted">No hay proyectos asignados.</p> }
+      @for (assignment of day.assignments; track assignment.proyecto_id + '-' + assignment.es_prevision) {
+        <div class="day-panel-item">
+          <button type="button" class="item-link" [disabled]="state.loading" (click)="openItem('proyectos', assignment.proyecto_id)">
+            {{ assignment.nombre || 'Proyecto' }}{{ assignment.es_prevision ? ' · previsión' : '' }}
+          </button>
+          <div class="day-panel-actions">
+            @if (assignment.es_prevision) {
+              <button type="button" class="secondary" [disabled]="state.loading"
+                      [attr.aria-label]="'Confirmar previsión de ' + (assignment.nombre || 'proyecto')"
+                      (click)="confirmProject(day, assignment)">Confirmar</button>
+            }
+            <button type="button" class="secondary" [disabled]="state.loading"
+                    [attr.aria-label]="'Eliminar ' + (assignment.nombre || 'proyecto') + (assignment.es_prevision ? ' previsión' : '')"
+                    (click)="removeProject(day, assignment)">Eliminar</button>
+          </div>
+        </div>
+      }
+      @if (catalogsLoaded) {
+        <div class="day-panel-form">
+          <label>Proyecto
+            <select [(ngModel)]="selectedProjectId">
+              <option [ngValue]="null">Selecciona un proyecto</option>
+              @for (project of projects; track project.proyecto_id) {
+                <option [ngValue]="project.proyecto_id">{{ project.nombre || 'Sin nombre' }}</option>
+              }
+            </select>
+          </label>
+          <label class="check"><input type="checkbox" [(ngModel)]="forecast"> Previsión</label>
+          <button type="button" class="primary" [disabled]="state.loading || !canAddProject(day)"
+                  (click)="addProject(day)">Añadir proyecto</button>
+        </div>
+      }
+    </section>
+    <section aria-labelledby="day-types-title">
+      <h3 id="day-types-title">Tipos de fecha</h3>
+      @if (!day.typings.length) { <p class="muted">No hay tipos asignados.</p> }
+      @for (typing of day.typings; track typing.tipo_id) {
+        <div class="day-panel-item">
+          <button type="button" class="item-link" [disabled]="state.loading" (click)="openItem('tipos', typing.tipo_id)">
+            {{ typing.nombre || 'Tipo de fecha' }}{{ typing.en_borde ? ' · borde' : '' }}
+          </button>
+          <button type="button" class="secondary" [disabled]="state.loading"
+                  [attr.aria-label]="'Eliminar ' + (typing.nombre || 'tipo de fecha')"
+                  (click)="removeType(day, typing)">Eliminar</button>
+        </div>
+      }
+      @if (catalogsLoaded) {
+        <div class="day-panel-form">
+          <label>Tipo de fecha
+            <select [(ngModel)]="selectedTypeId">
+              <option [ngValue]="null">Selecciona un tipo</option>
+              @for (type of dateTypes; track type.tipo_id) {
+                <option [ngValue]="type.tipo_id">{{ type.nombre || 'Sin nombre' }}{{ type.en_borde ? ' · borde' : '' }}</option>
+              }
+            </select>
+          </label>
+          @if (selectedTypeId !== null && !canAddType(day)) {
+            <p class="muted">El tipo debe tener una modalidad definida y solo puede haber uno de cada modalidad (con o sin borde). Elimina el existente para sustituirlo.</p>
+          }
+          <button type="button" class="primary" [disabled]="state.loading || !canAddType(day)"
+                  (click)="addType(day)">Añadir tipo</button>
+        </div>
+      }
+    </section>
+    @if (!catalogsLoaded) {
+      @if (state.loading) { <p class="muted" role="status">Cargando opciones…</p> }
+      @else { <button type="button" class="secondary" (click)="loadCatalogs()">Reintentar carga de opciones</button> }
+    }
+  </aside>
 }

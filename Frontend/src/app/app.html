@@ -15,6 +15,17 @@
     <nav class="navigation" aria-label="Navegación principal">
       <div class="nav-left">
         <button type="button" class="nav-link" [class.active]="state.view === 'calendar'" (click)="navigate('calendar')">Calendario</button>
+        @if (state.view === 'calendar' && calendar?.selectedMonth == null) {
+          <button type="button" class="nav-link" id="annual-info-button"
+                  [attr.aria-expanded]="calendar?.annualInfoOpen ?? false" aria-controls="annual-info-panel"
+                  (click)="calendar?.openAnnualInfo()">Información anual</button>
+          @if ((calendar?.selectedDates?.size ?? 0) > 1) {
+            <button type="button" class="nav-link" id="bulk-assign-button"
+                    [disabled]="state.loading || state.calendarLoading || !state.calendar.length"
+                    [attr.aria-expanded]="calendar?.bulkAssignOpen ?? false" aria-controls="bulk-assign-panel"
+                    (click)="calendar?.openBulkAssign()">Asignar</button>
+          }
+        }
         <div class="menu">
           <button type="button" class="nav-link" [class.active]="state.view !== 'calendar'"
                   [attr.aria-expanded]="state.menuOpen" aria-controls="settings-menu" (click)="state.menuOpen = !state.menuOpen">

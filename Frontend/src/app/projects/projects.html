@@ -14,6 +14,7 @@
         <label>Duración <input name="duracion" type="number" min="-32768" max="880" step="1" [(ngModel)]="projectForm.duracion"></label>
         <label>Restantes <input name="restantes" type="number" min="-32768" max="880" step="1" [(ngModel)]="projectForm.restantes"></label>
       </div>
+      <label class="check"><input name="laborable" type="checkbox" [(ngModel)]="projectForm.laborable"> Laborable</label>
       <label>Color <input name="color" type="color" [(ngModel)]="projectForm.color"></label>
       <div class="form-actions"><button class="primary" type="submit" [disabled]="state.loading || projectFormRef.invalid">Guardar</button>
         @if (editingId !== null) { <button type="button" class="secondary" (click)="resetForm()">Cancelar</button> }

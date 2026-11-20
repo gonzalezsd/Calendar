@@ -6,14 +6,14 @@ export interface User {
 }
 export interface Project {
   proyecto_id: number; nombre: string | null; descripcion: string | null;
-  duracion: number | null; restantes: number | null; color: string | null;
+  duracion: number | null; restantes: number | null; color: string | null; laborable: boolean;
 }
 export interface DateType {
   tipo_id: number; nombre: string | null; descripcion: string | null;
   color: string | null; en_borde: boolean | null;
 }
 export interface Assignment {
-  fecha: string; proyecto_id: number; nombre: string | null; color: string | null; es_prevision: boolean;
+  fecha: string; proyecto_id: number; nombre: string | null; color: string | null; laborable: boolean; es_prevision: boolean;
 }
 export interface Typing {
   fecha: string; tipo_id: number; nombre: string | null; color: string | null; en_borde: boolean | null;

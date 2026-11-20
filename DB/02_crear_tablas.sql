@@ -20,6 +20,7 @@ CREATE TABLE proyectos (
     descripcion text,
     duracion smallint CHECK (duracion <= 880),
     restantes smallint CHECK (restantes <= 880),
+    laborable boolean NOT NULL DEFAULT true,
     color varchar(7) CHECK (color ~ '^#[0-9A-Fa-f]{6}$')
 );
 

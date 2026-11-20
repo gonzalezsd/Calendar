@@ -16,8 +16,13 @@ export class ProjectsComponent implements OnInit {
   constructor(readonly state: AppState) {}
 
   async ngOnInit(): Promise<void> {
+    const target = this.state.editTarget?.view === 'proyectos' ? this.state.editTarget.id : null;
+    this.state.editTarget = null;
     await this.state.run(async () => {
       this.projects = await this.state.request<Project[]>('GET', '/api/proyectos');
+      const project = this.projects.find(item => item.proyecto_id === target);
+      if (project) this.editProject(project);
+      else if (target !== null) this.state.error = 'El proyecto ya no está disponible.';
     });
   }
 
@@ -32,15 +37,15 @@ export class ProjectsComponent implements OnInit {
   }
 
   private emptyProject(): EditableProject {
-    return { nombre: '', descripcion: '', duracion: null, restantes: null, color: '#4f46e5' };
+    return { nombre: '', descripcion: '', duracion: null, restantes: null, color: '#4f46e5', laborable: true };
   }
 
   async saveProject(form: NgForm): Promise<void> {
     if (form.invalid) return;
     await this.state.run(async () => {
-      const { nombre, descripcion, duracion, restantes, color } = this.projectForm;
+      const { nombre, descripcion, duracion, restantes, color, laborable } = this.projectForm;
       const url = this.editingId === null ? '/api/proyectos' : `/api/proyectos/${this.editingId}`;
-      await this.state.request(this.editingId === null ? 'POST' : 'PATCH', url, { nombre, descripcion, duracion, restantes, color });
+      await this.state.request(this.editingId === null ? 'POST' : 'PATCH', url, { nombre, descripcion, duracion, restantes, color, laborable });
       this.resetForm();
       this.projects = await this.state.request<Project[]>('GET', '/api/proyectos');
       if (this.state.year !== null) await this.state.loadCalendar(this.state.year);
