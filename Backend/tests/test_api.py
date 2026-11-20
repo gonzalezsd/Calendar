@@ -28,7 +28,6 @@ class APITests(unittest.TestCase):
         with psycopg.connect(self.url, autocommit=True) as db:
             db.execute((ROOT / "DB/02_crear_tablas.sql").read_text())
             db.execute((ROOT / "DB/03_crear_tipo_festivo.sql").read_text())
-            db.execute((ROOT / "DB/04_crear_proyecto_vacaciones.sql").read_text())
         self.app = create_app({"TESTING": True, "DATABASE_URL": self.url, "SECRET_KEY": "test-key-" * 5})
         with patch("app.getpass", side_effect=["password123", "password123"]):
             result = self.app.test_cli_runner().invoke(
@@ -225,21 +224,6 @@ class APITests(unittest.TestCase):
                 db.execute(seed)
             db.execute("ROLLBACK")
             self.assertEqual(db.execute("SELECT count(*) FROM tipos_fecha WHERE nombre = 'Festivo'").fetchone()[0], 2)
-
-    def test_vacaciones_project_seed_and_protection(self):
-        with psycopg.connect(self.url, autocommit=True) as db:
-            db.execute((ROOT / "DB/04_crear_proyecto_vacaciones.sql").read_text())
-            rows = db.execute(
-                "SELECT proyecto_id, nombre, duracion, restantes, color FROM proyectos WHERE nombre = 'Vacaciones'"
-            ).fetchall()
-        self.assertEqual(len(rows), 1)
-        project_id, nombre, duracion, restantes, color = rows[0]
-        self.assertEqual((nombre, duracion, restantes, color), ("Vacaciones", None, None, "#FF7800"))
-        self.assertEqual(self.client.post("/api/proyectos", headers=self.admin, json={"nombre": "Vacaciones"}).status_code, 409)
-        self.assertEqual(self.client.patch(f"/api/proyectos/{project_id}", headers=self.admin, json={"nombre": "Otro"}).status_code, 409)
-        self.assertEqual(self.client.patch(f"/api/proyectos/{project_id}", headers=self.admin, json={"duracion": 10}).status_code, 409)
-        self.assertEqual(self.client.patch(f"/api/proyectos/{project_id}", headers=self.admin, json={"restantes": 5}).status_code, 409)
-        self.assertEqual(self.client.patch(f"/api/proyectos/{project_id}", headers=self.admin, json={"color": "#FF0000"}).status_code, 200)
 
     def test_years_are_unique_sorted_and_private(self):
         self.create_user("other")

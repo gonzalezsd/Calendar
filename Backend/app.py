@@ -213,8 +213,6 @@ def create_app(test_config=None):
     @authenticated()
     def create_project():
         values = validate_fields(body(PROJECT_FIELDS, set()), PROJECT_FIELDS)
-        if values.get("nombre") == "Vacaciones":
-            raise APIError("El nombre Vacaciones está reservado", 409)
         with get_db().transaction():
             result = insert("proyectos", values)
         return jsonify(result), 201
@@ -229,19 +227,7 @@ def create_app(test_config=None):
     def update_project(project_id):
         positive_id(project_id)
         values = validate_fields(body(PROJECT_FIELDS, set()), PROJECT_FIELDS)
-        db = get_db()
-        with db.transaction():
-            old = db.execute("SELECT nombre, duracion, restantes, color FROM proyectos WHERE proyecto_id = %s FOR UPDATE", (project_id,)).fetchone()
-            if not old:
-                raise APIError("Proyecto no encontrado", 404)
-            if old["nombre"] != "Vacaciones" and values.get("nombre") == "Vacaciones":
-                raise APIError("El nombre Vacaciones está reservado", 409)
-            if old["nombre"] == "Vacaciones" and (
-                ("nombre" in values and values["nombre"] != "Vacaciones")
-                or ("duracion" in values and values["duracion"] is not None)
-                or ("restantes" in values and values["restantes"] is not None)
-            ):
-                raise APIError("El nombre, duración y restantes del proyecto Vacaciones están reservados", 409)
+        with get_db().transaction():
             result = update("proyectos", "proyecto_id", project_id, values)
         return jsonify(result)
 
