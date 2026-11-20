@@ -8,11 +8,11 @@
   </section>
   <section class="panel"><h3>{{ editingId === null ? 'Nuevo proyecto' : 'Editar proyecto' }}</h3>
     <form #projectFormRef="ngForm" (ngSubmit)="saveProject(projectFormRef)" class="form-stack">
-      <label>Nombre <input name="nombre" [(ngModel)]="projectForm.nombre" maxlength="255" required></label>
+      <label>Nombre <input name="nombre" [(ngModel)]="projectForm.nombre" maxlength="255" required [readonly]="editingId !== null && projectForm.nombre === 'Vacaciones'"></label>
       <label>Descripción <textarea name="descripcion" [(ngModel)]="projectForm.descripcion" rows="3"></textarea></label>
       <div class="form-row">
-        <label>Duración <input name="duracion" type="number" min="-32768" max="880" step="1" [(ngModel)]="projectForm.duracion"></label>
-        <label>Restantes <input name="restantes" type="number" min="-32768" max="880" step="1" [(ngModel)]="projectForm.restantes"></label>
+        <label>Duración <input name="duracion" type="number" min="-32768" max="880" step="1" [(ngModel)]="projectForm.duracion" [disabled]="editingId !== null && projectForm.nombre === 'Vacaciones'"></label>
+        <label>Restantes <input name="restantes" type="number" min="-32768" max="880" step="1" [(ngModel)]="projectForm.restantes" [disabled]="editingId !== null && projectForm.nombre === 'Vacaciones'"></label>
       </div>
       <label>Color <input name="color" type="color" [(ngModel)]="projectForm.color"></label>
       <div class="form-actions"><button class="primary" type="submit" [disabled]="state.loading || projectFormRef.invalid">Guardar</button>
