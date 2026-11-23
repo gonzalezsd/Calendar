@@ -15,11 +15,17 @@ falla si ya existe; en ese caso, ejecuta el segundo script sobre la base de
 datos deseada. El segundo script también falla si las tablas ya existen.
 El script de tablas crea también las credenciales y las relaciones por usuario
 necesarias para el backend; no actualiza tablas creadas con versiones anteriores.
+Para una instalación existente que todavía no tenga la tabla `notas`, ejecuta
+`psql -v ON_ERROR_STOP=1 -d calendar -f DB/05_crear_notas.sql`. Este script no
+es necesario en instalaciones nuevas y falla si la tabla ya existe.
 El tercer script crea el tipo básico `Festivo` y su índice de unicidad; puede
 ejecutarse también sobre una instalación existente. El cuarto script crea el
 proyecto básico `Vacaciones` y su índice de unicidad; puede ejecutarse también
 sobre una instalación existente. Si ya existe un `Festivo` o `Vacaciones`
 distinto o hay duplicados, falla sin modificar los datos para que se revisen.
+
+Las notas contienen fecha y texto y se asocian a un único usuario; la clave
+primaria impide que un usuario tenga más de una nota en la misma fecha.
 
 Los identificadores primarios se generan automáticamente, aunque se pueden
 proporcionar explícitamente. Los campos sin restricciones explícitas admiten

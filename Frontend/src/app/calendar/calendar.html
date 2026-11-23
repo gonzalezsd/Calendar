@@ -23,21 +23,32 @@
     <button type="button" class="secondary" [disabled]="state.loading" (click)="reloadCalendar()">Reintentar</button>
   </div>
 } @else if (state.calendar.length) {
+  @let today = todayDate;
+  @let vacationColors = vacationBackgrounds();
   <div class="calendar-grid" [class.monthly-view]="selectedMonth !== null">
     @for (month of state.calendar; track month.name; let monthIndex = $index) {
       @if (selectedMonth === null || selectedMonth === monthIndex) {
         <section class="month-card" [attr.aria-label]="month.name + ' ' + state.year">
           <h3><button type="button" class="month-name" [attr.aria-label]="'Ver ' + month.name + ' ' + state.year"
-                      (click)="showMonth(monthIndex)">{{ month.name }}</button></h3>
+                      (click)="showMonth(monthIndex)">{{ month.name }}</button>
+            @let workedDays = workedDaysInMonth(month);
+            <span [attr.aria-label]="workedDays + ' días trabajados'">({{ workedDays }})</span>
+          </h3>
           <div class="month-grid">
             @for (weekday of weekdays; track $index) { <span class="weekday">{{ weekday }}</span> }
             @for (day of month.days; track $index) {
               @if (day) {
                 <button type="button" class="day" [attr.aria-label]="day.date" [style.outline]="getTypingBorderStyle(day)"
+                     [attr.aria-describedby]="day.note !== null ? 'note-indicator-' + day.date + ' note-preview-' + day.date : null"
                      [attr.aria-pressed]="selectedDates.has(day.date)" [disabled]="state.loading" (click)="selectDay(day, $event)"
-                     [style.background-color]="getProjectBackground(day)"
+                     [class.past-unassigned]="day.date < today && !day.assignments.length"
+                     [style.background-color]="getProjectBackground(day) || vacationColors.get(day.date) || null"
                      [style.outline-offset]="getTypingBorderStyle(day) ? '-2px' : null">
                   <span class="day-number" [style.color]="getTypingNumberColor(day)">{{ day.number }}</span>
+                  @if (day.note !== null) {
+                    <span class="note-indicator" [id]="'note-indicator-' + day.date">Nota</span>
+                    <span class="note-preview" [id]="'note-preview-' + day.date" role="tooltip">{{ day.note }}</span>
+                  }
                   @if (selectedDates.has(day.date)) { <span class="selection-mark" aria-hidden="true">✓</span> }
                 </button>
               } @else { <span class="blank-day"></span> }
@@ -96,12 +107,14 @@
 @if (annualInfoOpen) {
   <aside class="day-panel annual-info" id="annual-info-panel" aria-labelledby="annual-info-title">
     <div class="day-panel-heading">
-      <div><p class="eyebrow">RESUMEN DEL AÑO</p><h2 id="annual-info-title">Información anual {{ state.year ?? '' }}</h2></div>
-      <button #closeAnnualButton type="button" class="secondary" (click)="closeAnnualInfo()" aria-label="Cerrar información anual">Cerrar</button>
+      <div><p class="eyebrow">RESUMEN {{ selectedMonth === null ? 'DEL AÑO' : 'DEL MES' }}</p>
+        <h2 id="annual-info-title">Información {{ selectedMonth === null ? 'anual' : 'mensual' }} {{ selectedMonth === null ? '' : (state.calendar[selectedMonth]?.name ?? '') + ' ' }}{{ state.year ?? '' }}</h2></div>
+      <button #closeAnnualButton type="button" class="secondary" (click)="closeAnnualInfo()"
+              [attr.aria-label]="'Cerrar información ' + (selectedMonth === null ? 'anual' : 'mensual')">Cerrar</button>
     </div>
     @if (state.error) { <p class="notice error" role="alert">{{ state.error }}</p> }
     @if (state.calendarLoading || state.loading) {
-      <p class="muted" role="status">Cargando información anual…</p>
+      <p class="muted" role="status">Cargando información {{ selectedMonth === null ? 'anual' : 'mensual' }}…</p>
     } @else if (state.year === null) {
       <p class="muted">Selecciona un año para consultar su información.</p>
     } @else if (!state.calendar.length) {
@@ -110,8 +123,8 @@
     } @else if (!catalogsLoaded) {
       <button type="button" class="secondary" (click)="loadCatalogs()">Reintentar carga de opciones</button>
     } @else {
-      @let summary = annualSummary;
-      <section aria-label="Días del año">
+      @let summary = periodSummary;
+      <section [attr.aria-label]="selectedMonth === null ? 'Días del año' : 'Días del mes'">
         <p>Días laborables: <strong>{{ summary.workingDays }}</strong></p>
         <p>Días trabajados: <strong>{{ summary.workedDays }}</strong></p>
       </section>
@@ -129,6 +142,7 @@
             <p>Duración inicial: {{ project.duracion ?? '—' }}</p>
             <p>Días restantes: {{ project.restantes ?? '—' }}</p>
             <p>Días asignados: {{ project.days }}</p>
+            <p>Días trabajados: {{ project.workedDays }}</p>
           </div>
         } @empty { <p class="muted">No hay proyectos.</p> }
       </section>
@@ -146,6 +160,13 @@
     @if (refreshFailed) {
       <button type="button" class="secondary" [disabled]="state.loading" (click)="retryRefresh(day)">Reintentar actualización del calendario</button>
     }
+    <section aria-labelledby="day-note-title">
+      <h3 id="day-note-title">Nota</h3>
+      <label for="day-note">Texto de la nota</label>
+      <textarea id="day-note" rows="4" [(ngModel)]="noteDraft" [disabled]="state.loading"></textarea>
+      <button type="button" class="primary" (click)="saveNote(day)"
+              [disabled]="state.loading || !noteDirty || (day.note === null && !noteDraft.trim())">Guardar nota</button>
+    </section>
     <section aria-labelledby="day-projects-title">
       <h3 id="day-projects-title">Proyectos</h3>
       @if (!day.assignments.length) { <p class="muted">No hay proyectos asignados.</p> }

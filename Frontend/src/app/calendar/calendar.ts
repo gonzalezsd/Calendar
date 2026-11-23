@@ -1,7 +1,7 @@
 import { Component, DoCheck, ElementRef, HostListener, ViewChild } from '@angular/core';
 import { FormsModule, NgForm } from '@angular/forms';
 import { AppState } from '../core/app-state';
-import { Assignment, DateType, Day, Project, Typing } from '../core/models';
+import { Assignment, DateType, Day, Month, Project, Typing, VacationColor } from '../core/models';
 
 @Component({
   selector: 'app-calendar',
@@ -15,6 +15,7 @@ export class CalendarComponent implements DoCheck {
   annualInfoOpen = false;
   bulkAssignOpen = false;
   selectedDay: Day | null = null;
+  noteDraft = '';
   readonly selectedDates = new Set<string>();
   private selectionYear: number | null;
   projects: Project[] = [];
@@ -55,6 +56,7 @@ export class CalendarComponent implements DoCheck {
 
   showMonth(index: number): void {
     if (this.selectedMonth === index) return;
+    if (!this.canLeaveDay()) return;
     this.dismissDay();
     this.annualInfoOpen = false;
     this.bulkAssignOpen = false;
@@ -62,11 +64,17 @@ export class CalendarComponent implements DoCheck {
   }
 
   showYear(): void {
-    if (this.selectedMonth !== null) this.dismissDay();
+    if (this.selectedMonth !== null) {
+      if (!this.canLeaveDay()) return;
+      this.dismissDay();
+      this.annualInfoOpen = false;
+    }
     this.selectedMonth = null;
   }
 
   async selectDay(day: Day, event: MouseEvent): Promise<void> {
+    if (this.selectedDay === day && !event.shiftKey) return;
+    if (!this.canLeaveDay()) return;
     this.annualInfoOpen = false;
     this.bulkAssignOpen = false;
     if (event.shiftKey) {
@@ -77,6 +85,7 @@ export class CalendarComponent implements DoCheck {
     this.selectedDates.clear();
     this.selectedDates.add(day.date);
     this.selectedDay = day;
+    this.noteDraft = day.note ?? '';
     this.selectedProjectId = null;
     this.selectedTypeId = null;
     this.forecast = false;
@@ -96,6 +105,7 @@ export class CalendarComponent implements DoCheck {
   }
 
   async openAnnualInfo(): Promise<void> {
+    if (!this.canLeaveDay()) return;
     this.dismissDay();
     this.bulkAssignOpen = false;
     this.annualInfoOpen = true;
@@ -103,6 +113,7 @@ export class CalendarComponent implements DoCheck {
   }
 
   async openBulkAssign(): Promise<void> {
+    if (!this.canLeaveDay()) return;
     this.dismissDay();
     this.annualInfoOpen = false;
     this.bulkProjectIds.clear();
@@ -147,20 +158,38 @@ export class CalendarComponent implements DoCheck {
     document.getElementById('annual-info-button')?.focus();
   }
 
-  get annualSummary() {
+  get todayDate(): string {
+    const today = new Date();
+    return `${String(today.getFullYear()).padStart(4, '0')}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+  }
+
+  workedDaysInMonth(month: Month): number {
+    return month.days.filter(day => day && this.isWorkedDay(day)).length;
+  }
+
+  private isWorkedDay(day: Day): boolean {
+    return day.assignments.some(project => project.laborable && !project.es_prevision);
+  }
+
+  get periodSummary() {
     const projectDays = new Map<number, number>();
+    const projectWorkedDays = new Map<number, number>();
     const typeDays = new Map<number, number>();
     let workingDays = 0;
     let workedDays = 0;
 
-    for (const month of this.state.calendar) {
+    for (const [index, month] of this.state.calendar.entries()) {
+      if (this.selectedMonth !== null && index !== this.selectedMonth) continue;
       for (const day of month.days) {
         if (!day) continue;
         if (!day.typings.some(type => type.nombre === 'Festivo') &&
             !day.assignments.some(project => project.nombre === 'Vacaciones')) workingDays++;
-        if (day.assignments.some(project => project.laborable)) workedDays++;
+        if (this.isWorkedDay(day)) workedDays++;
         for (const id of new Set(day.assignments.map(project => project.proyecto_id))) {
           projectDays.set(id, (projectDays.get(id) ?? 0) + 1);
+        }
+        for (const id of new Set(day.assignments.filter(project => !project.es_prevision).map(project => project.proyecto_id))) {
+          projectWorkedDays.set(id, (projectWorkedDays.get(id) ?? 0) + 1);
         }
         for (const id of new Set(day.typings.map(type => type.tipo_id))) {
           typeDays.set(id, (typeDays.get(id) ?? 0) + 1);
@@ -171,7 +200,10 @@ export class CalendarComponent implements DoCheck {
     return {
       workingDays,
       workedDays,
-      projects: this.projects.map(project => ({ ...project, days: projectDays.get(project.proyecto_id) ?? 0 })),
+      projects: this.projects.map(project => ({
+        ...project, days: projectDays.get(project.proyecto_id) ?? 0,
+        workedDays: projectWorkedDays.get(project.proyecto_id) ?? 0
+      })),
       types: this.dateTypes.map(type => ({ ...type, days: typeDays.get(type.tipo_id) ?? 0 }))
     };
   }
@@ -186,6 +218,7 @@ export class CalendarComponent implements DoCheck {
       this.closeAnnualInfo();
       return;
     }
+    if (!this.canLeaveDay()) return;
     const date = this.dismissDay();
     if (date) document.querySelector<HTMLButtonElement>(`.day[aria-label="${date}"]`)?.focus();
   }
@@ -194,13 +227,44 @@ export class CalendarComponent implements DoCheck {
     const date = this.selectedDay?.date;
     if (date) this.selectedDates.delete(date);
     this.selectedDay = null;
+    this.noteDraft = '';
     return date;
   }
 
+  get noteDirty(): boolean {
+    return !!this.selectedDay && this.noteDraft !== (this.selectedDay.note ?? '');
+  }
+
+  canLeaveDay(): boolean {
+    return !this.noteDirty || window.confirm('Hay cambios en la nota sin guardar. ¿Descartarlos?');
+  }
+
+  @HostListener('window:beforeunload', ['$event'])
+  beforeUnload(event: BeforeUnloadEvent): void {
+    if (this.noteDirty) event.preventDefault();
+  }
+
   openItem(view: 'proyectos' | 'tipos', id: number): void {
+    if (!this.canLeaveDay()) return;
     this.state.editTarget = { view, id };
     this.state.menuOpen = false;
     this.state.view = view;
+  }
+
+  async saveNote(day: Day): Promise<void> {
+    const text = this.noteDraft;
+    if (!this.noteDirty || (!day.note && !text.trim())) return;
+    await this.state.run(async () => {
+      if (text.trim()) {
+        await this.state.request('PUT', `/api/notas/${day.date}`, { texto: text });
+        day.note = text;
+      } else {
+        await this.state.request('DELETE', `/api/notas/${day.date}`);
+        day.note = null;
+        this.noteDraft = '';
+      }
+      this.state.message = 'Nota guardada.';
+    });
   }
 
   canAddProject(day: Day): boolean {
@@ -317,12 +381,49 @@ export class CalendarComponent implements DoCheck {
     if (!first) return null;
     const color = day.assignments.some(item => item.proyecto_id !== first.proyecto_id)
       ? '#2C813A' : first.color || '#9ca3af';
-    return day.assignments.every(item => item.es_prevision)
-      ? `color-mix(in srgb, ${color} 80%, white)` : color;
+    return this.assignmentColor(color, day.assignments.every(item => item.es_prevision));
+  }
+
+  vacationBackgrounds(): Map<string, string> {
+    const days = this.state.calendar.flatMap(month => month.days).filter((day): day is Day => day !== null);
+    const result = new Map<string, string>();
+    const isNonWorking = (day: Day): boolean => {
+      const weekday = new Date(`${day.date}T12:00:00`).getDay();
+      return weekday === 0 || weekday === 6 || day.typings.some(type => type.nombre === 'Festivo');
+    };
+    const vacations = (day: Day): VacationColor[] => day.assignments.filter(item => item.nombre === 'Vacaciones');
+
+    for (let start = 0; start < days.length;) {
+      if (!isNonWorking(days[start])) {
+        start++;
+        continue;
+      }
+      let end = start + 1;
+      while (end < days.length && isNonWorking(days[end])) end++;
+      const nearby = [
+        ...(start > 0 ? vacations(days[start - 1]) : this.state.vacationContext.anterior),
+        ...days.slice(start, end).flatMap(vacations),
+        ...(end < days.length ? vacations(days[end]) : this.state.vacationContext.posterior)
+      ];
+      const vacation = nearby.find(item => !item.es_prevision) ?? nearby[0];
+      if (vacation) {
+        const color = this.assignmentColor(vacation.color || '#9ca3af', vacation.es_prevision);
+        for (const day of days.slice(start, end)) {
+          if (!day.assignments.length) result.set(day.date, color);
+        }
+      }
+      start = end;
+    }
+    return result;
+  }
+
+  private assignmentColor(color: string, forecast: boolean): string {
+    return forecast ? `color-mix(in srgb, ${color} 50%, white)` : color;
   }
 
   async createYear(form: NgForm): Promise<void> {
     if (form.invalid || !Number.isInteger(this.newYear)) return;
+    if (!this.canLeaveDay()) return;
     await this.state.run(async () => {
       await this.state.request('POST', '/api/new_year', { year: this.newYear });
       await this.state.loadYears(this.newYear);

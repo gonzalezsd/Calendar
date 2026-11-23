@@ -9,17 +9,17 @@
       <h1 class="year-title">{{ state.year ?? '—' }}</h1>
       <div class="account">
         <span>Mi calendario</span>
-        <button class="text-button" type="button" (click)="state.logout()">Cerrar sesión</button>
+        <button class="text-button" type="button" (click)="logout()">Cerrar sesión</button>
       </div>
     </div>
     <nav class="navigation" aria-label="Navegación principal">
       <div class="nav-left">
         <button type="button" class="nav-link" [class.active]="state.view === 'calendar'" (click)="navigate('calendar')">Calendario</button>
-        @if (state.view === 'calendar' && calendar?.selectedMonth == null) {
+        @if (state.view === 'calendar') {
           <button type="button" class="nav-link" id="annual-info-button"
                   [attr.aria-expanded]="calendar?.annualInfoOpen ?? false" aria-controls="annual-info-panel"
-                  (click)="calendar?.openAnnualInfo()">Información anual</button>
-          @if ((calendar?.selectedDates?.size ?? 0) > 1) {
+                  (click)="calendar?.openAnnualInfo()">Información {{ calendar?.selectedMonth == null ? 'anual' : 'mensual' }}</button>
+          @if (calendar?.selectedMonth == null && (calendar?.selectedDates?.size ?? 0) > 1) {
             <button type="button" class="nav-link" id="bulk-assign-button"
                     [disabled]="state.loading || state.calendarLoading || !state.calendar.length"
                     [attr.aria-expanded]="calendar?.bulkAssignOpen ?? false" aria-controls="bulk-assign-panel"
@@ -43,7 +43,7 @@
         </div>
       </div>
       <label class="year-selector">Año
-        <select [value]="state.year ?? ''" (change)="state.changeYear($any($event.target).value)" [disabled]="!state.years.length">
+        <select [value]="state.year ?? ''" (change)="changeYear($event)" [disabled]="!state.years.length">
           @if (!state.years.length) { <option value="">Sin años</option> }
           @for (option of state.years; track option) { <option [value]="option">{{ option }}</option> }
         </select>

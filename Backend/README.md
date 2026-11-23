@@ -1,7 +1,7 @@
 # API de Calendar
 
 API JSON de Flask para PostgreSQL, independiente del lenguaje o framework del
-cliente. El calendario es individual: las asignaciones y los tipados pertenecen
+cliente. El calendario es individual: las asignaciones, los tipados y las notas pertenecen
 al usuario autenticado. Los proyectos y tipos de fecha son compartidos.
 
 ## Preparación
@@ -63,7 +63,7 @@ repositorio.
 
 Las peticiones y respuestas usan JSON. Salvo el inicio de sesión, todas las
 operaciones requieren `Authorization: Bearer <access_token>`. Los tokens firmados
-caducan en una hora; cambiar las credenciales los invalida y desactivar un
+caducan en diez horas; cambiar las credenciales los invalida y desactivar un
 usuario impide su uso. No son tokens JWT.
 
 | Método y ruta | Cuerpo o resultado |
@@ -85,9 +85,11 @@ usuario impide su uso. No son tokens JWT.
 | `DELETE /api/asignaciones/{fecha}/{proyecto_id}/{es_prevision}` | `es_prevision` es `true` o `false` |
 | `POST /api/tipados` | `fecha`, `tipo_id` |
 | `DELETE /api/tipados/{fecha}/{tipo_id}` | Elimina el tipado del usuario autenticado |
+| `PUT /api/notas/{fecha}` | `{"texto": "..."}`; crea o actualiza la nota del usuario para esa fecha |
+| `DELETE /api/notas/{fecha}` | Elimina la nota del usuario para esa fecha |
 | `GET /api/get_years` | Devuelve `{"years": [2025, 2026]}` con los años del usuario autenticado, sin duplicados y ordenados |
-| `GET /api/calendario/{year}` | Asignaciones y tipados del usuario autenticado para el año indicado |
-| `POST /api/new_year` | `{"year": 2026}`; crea un tipado `Festivo` para el 1 de enero del usuario autenticado |
+| `GET /api/calendario/{year}` | Asignaciones, tipados y notas del usuario para el año, y `contexto_vacaciones` de los días adyacentes fuera del año |
+| `POST /api/new_year` | `{"year": 2026}`; tipa como `Festivo` el 1 de enero y todos los sábados y domingos del usuario |
 
 Solo los administradores pueden crear o modificar usuarios. Los demás cambios
 puede hacerlos cualquier usuario activo. En las creaciones de usuario,
@@ -97,6 +99,11 @@ y `es_administrador` en `false` si se omiten. Las contraseñas deben tener entre
 
 Los proyectos tienen un campo booleano `laborable`, que por defecto es `true`.
 También se incluye en las asignaciones devueltas por el calendario.
+Las notas son privadas y hay como máximo una por usuario y fecha. Su texto debe
+contener algún carácter distinto de espacios y no puede contener caracteres
+nulos; se conserva el texto introducido. `PUT` devuelve la nota con código 200.
+`DELETE` devuelve 404 si no existe. Los años con notas también aparecen en
+`get_years`.
 
 Las fechas usan `AAAA-MM-DD`; los colores, `#RRGGBB`. Cada usuario puede asignar
 varios proyectos a una fecha, pero no repetir la misma combinación de fecha,
@@ -108,19 +115,32 @@ respetar esta regla.
 Al confirmar una previsión se convierte en asignación confirmada. Si esta ya
 existía para el mismo día y proyecto, se elimina la previsión y se conserva la
 asignación confirmada. Si no existe la previsión, la API devuelve 404.
+Una asignación confirmada nueva descuenta un día de `restantes` del proyecto
+compartido, tanto si se crea directamente como si se confirma una previsión;
+si ya estaba confirmada no se descuenta otra vez. Las previsiones no descuentan.
+Si `restantes` es `null`, no cambia; si es cero o negativo, la confirmación
+devuelve 409. Al eliminar una asignación confirmada se devuelve un día, salvo
+que `restantes` sea `null`; si superaría 880, la eliminación devuelve 409.
+Esto también se aplica a asignaciones existentes y no recalcula datos históricos.
 La asignación múltiple acepta al menos dos fechas distintas del mismo año y uno
 o más proyectos o tipos; `es_prevision` se aplica a todos los proyectos. Si
-alguna asignación ya existe o un tipo entra en conflicto, devuelve 409 y no
+alguna asignación ya existe, faltan días restantes o un tipo entra en conflicto, devuelve 409 y no
 guarda ninguna. Devuelve 201 con las cantidades de fechas, asignaciones y
 tipados creados.
 
 El tipo básico `Festivo` se crea con el script de datos de `DB`, con color
 `#FF0000` y `en_borde=false`. Su nombre está reservado y no se puede cambiar
 su nombre ni su valor de `en_borde` desde la API. `new_year` requiere un año
-entero entre 1 y 9999 y devuelve el tipado creado con código 201. Si el tipo
-`Festivo` no está configurado correctamente o ya existe un tipado no de borde
-para ese día, devuelve 409 sin modificar los datos. Se permite coexistir con un
-tipado de borde.
+entero entre 1 y 9999 y devuelve el tipado del 1 de enero con código 201.
+Cuando el 1 de enero cae en fin de semana se inserta una sola vez. Si el tipo
+`Festivo` no está configurado correctamente o cualquiera de las fechas tiene
+un tipado no de borde incompatible, devuelve 409 sin modificar los datos. Se
+permite coexistir con un tipado de borde.
+
+El calendario incluye `contexto_vacaciones`, con las listas `anterior` y
+`posterior` de colores y estados de previsión de asignaciones de `Vacaciones`
+del usuario que conectan con el límite del año a través de festivos y fines de
+semana consecutivos. Este contexto es visual y no añade asignaciones al año.
 
 Las creaciones devuelven 201, las modificaciones 200 y las eliminaciones 204.
 Los errores devuelven un objeto `{"error": "..."}` con el código HTTP

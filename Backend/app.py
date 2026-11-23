@@ -1,6 +1,6 @@
 import json
 import re
-from datetime import date
+from datetime import date, timedelta
 from functools import wraps
 from getpass import getpass
 from pathlib import Path
@@ -23,6 +23,7 @@ class APIError(Exception):
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("config.json")
+TOKEN_MAX_AGE_SECONDS = 10 * 60 * 60
 
 
 def load_config(path):
@@ -135,7 +136,7 @@ def create_app(test_config=None):
         if not user or not user["activo"] or not check_password_hash(user["password_hash"], data["password"]):
             raise APIError("Credenciales incorrectas", 401)
         token = serializer().dumps({"usuario_id": user["usuario_id"], "version": user["version"]})
-        return jsonify(access_token=token, token_type="Bearer", expires_in=3600)
+        return jsonify(access_token=token, token_type="Bearer", expires_in=TOKEN_MAX_AGE_SECONDS)
 
     @app.get("/api/me")
     @authenticated()
@@ -294,7 +295,7 @@ def create_app(test_config=None):
             if len(existing_types) != len(types):
                 raise APIError("Tipo de fecha no encontrado", 404)
             existing_projects = db.execute(
-                "SELECT proyecto_id FROM proyectos WHERE proyecto_id = ANY(%s) ORDER BY proyecto_id FOR KEY SHARE",
+                "SELECT proyecto_id FROM proyectos WHERE proyecto_id = ANY(%s) ORDER BY proyecto_id FOR UPDATE",
                 (projects,),
             ).fetchall()
             if len(existing_projects) != len(projects):
@@ -311,6 +312,8 @@ def create_app(test_config=None):
                     ).fetchone()
                     if not inserted:
                         raise APIError(f"{day.isoformat()}: el proyecto {project_id} ya está asignado", 409)
+                    if not data["es_prevision"]:
+                        change_remaining(db, project_id, -1)
                 for type_id in sorted(types):
                     try:
                         insert_typing(db, day, type_id)
@@ -326,12 +329,16 @@ def create_app(test_config=None):
         project_id = positive_id(data["proyecto_id"])
         if type(data["es_prevision"]) is not bool:
             raise APIError("es_prevision debe ser booleano", 400)
-        with get_db().transaction():
-            result = get_db().execute(
+        db = get_db()
+        with db.transaction():
+            lock_project(db, project_id)
+            result = db.execute(
                 """INSERT INTO asignaciones (usuario_id, fecha, proyecto_id, es_prevision)
                    VALUES (%s, %s, %s, %s) RETURNING usuario_id, fecha, proyecto_id, es_prevision""",
                 (g.user["usuario_id"], day, project_id, data["es_prevision"]),
             ).fetchone()
+            if not data["es_prevision"]:
+                change_remaining(db, project_id, -1)
         result["fecha"] = result["fecha"].isoformat()
         return jsonify(result), 201
 
@@ -342,6 +349,7 @@ def create_app(test_config=None):
         positive_id(project_id)
         db = get_db()
         with db.transaction():
+            lock_project(db, project_id)
             row = db.execute(
                 """DELETE FROM asignaciones WHERE usuario_id = %s AND fecha = %s
                    AND proyecto_id = %s AND es_prevision = true RETURNING usuario_id""",
@@ -349,12 +357,15 @@ def create_app(test_config=None):
             ).fetchone()
             if not row:
                 raise APIError("Previsión no encontrada", 404)
-            db.execute(
+            inserted = db.execute(
                 """INSERT INTO asignaciones (usuario_id, fecha, proyecto_id, es_prevision)
                    VALUES (%s, %s, %s, false)
-                   ON CONFLICT (usuario_id, fecha, proyecto_id, es_prevision) DO NOTHING""",
+                   ON CONFLICT (usuario_id, fecha, proyecto_id, es_prevision) DO NOTHING
+                   RETURNING proyecto_id""",
                 (g.user["usuario_id"], day, project_id),
-            )
+            ).fetchone()
+            if inserted:
+                change_remaining(db, project_id, -1)
         return jsonify(usuario_id=g.user["usuario_id"], fecha=day.isoformat(), proyecto_id=project_id, es_prevision=False)
 
     @app.delete("/api/asignaciones/<day>/<int:project_id>/<forecast>")
@@ -364,14 +375,18 @@ def create_app(test_config=None):
         positive_id(project_id)
         if forecast not in ("true", "false"):
             raise APIError("es_prevision debe ser true o false", 400)
-        with get_db().transaction():
-            row = get_db().execute(
+        db = get_db()
+        with db.transaction():
+            lock_project(db, project_id)
+            row = db.execute(
                 """DELETE FROM asignaciones WHERE usuario_id = %s AND fecha = %s
                    AND proyecto_id = %s AND es_prevision = %s RETURNING usuario_id""",
                 (g.user["usuario_id"], day, project_id, forecast == "true"),
             ).fetchone()
             if not row:
                 raise APIError("Asignación no encontrada", 404)
+            if forecast == "false":
+                change_remaining(db, project_id, 1)
         return "", 204
 
     @app.post("/api/tipados")
@@ -385,6 +400,39 @@ def create_app(test_config=None):
             result = insert_typing(db, day, type_id)
         return jsonify(result), 201
 
+    @app.put("/api/notas/<day>")
+    @authenticated()
+    def save_note(day):
+        day = valid_date(day)
+        data = body({"texto"}, {"texto"})
+        text = data["texto"]
+        if not isinstance(text, str) or not text.strip() or "\x00" in text:
+            raise APIError("texto debe ser una cadena no vacía y sin caracteres nulos", 400)
+        db = get_db()
+        with db.transaction():
+            row = db.execute(
+                """INSERT INTO notas (usuario_id, fecha, texto) VALUES (%s, %s, %s)
+                   ON CONFLICT (usuario_id, fecha) DO UPDATE SET texto = EXCLUDED.texto
+                   RETURNING fecha, texto""",
+                (g.user["usuario_id"], day, text),
+            ).fetchone()
+        row["fecha"] = row["fecha"].isoformat()
+        return jsonify(row)
+
+    @app.delete("/api/notas/<day>")
+    @authenticated()
+    def delete_note(day):
+        day = valid_date(day)
+        db = get_db()
+        with db.transaction():
+            row = db.execute(
+                "DELETE FROM notas WHERE usuario_id = %s AND fecha = %s RETURNING fecha",
+                (g.user["usuario_id"], day),
+            ).fetchone()
+            if not row:
+                raise APIError("Nota no encontrada", 404)
+        return "", 204
+
     @app.get("/api/get_years")
     @authenticated()
     def get_years():
@@ -392,8 +440,10 @@ def create_app(test_config=None):
             """SELECT EXTRACT(YEAR FROM fecha)::integer AS year FROM asignaciones WHERE usuario_id = %s
                UNION
                SELECT EXTRACT(YEAR FROM fecha)::integer AS year FROM tipados WHERE usuario_id = %s
+               UNION
+               SELECT EXTRACT(YEAR FROM fecha)::integer AS year FROM notas WHERE usuario_id = %s
                ORDER BY year""",
-            (g.user["usuario_id"], g.user["usuario_id"]),
+            (g.user["usuario_id"], g.user["usuario_id"], g.user["usuario_id"]),
         ).fetchall()
         return jsonify(years=[row["year"] for row in rows])
 
@@ -417,9 +467,40 @@ def create_app(test_config=None):
                ORDER BY t.fecha, t.tipo_id""",
             (g.user["usuario_id"], year),
         ).fetchall()
-        for row in assignments + typings:
+        notes = db.execute(
+            """SELECT fecha, texto FROM notas
+               WHERE usuario_id = %s AND EXTRACT(YEAR FROM fecha) = %s ORDER BY fecha""",
+            (g.user["usuario_id"], year),
+        ).fetchall()
+        for row in assignments + typings + notes:
             row["fecha"] = row["fecha"].isoformat()
-        return jsonify(asignaciones=assignments, tipados=typings)
+        context = {"anterior": [], "posterior": []}
+        for key, boundary, step in (
+            ("anterior", date(year, 1, 1), -1),
+            ("posterior", date(year, 12, 31), 1),
+        ):
+            if boundary == (date.min if step < 0 else date.max):
+                continue
+            context[key] = db.execute(
+                """WITH RECURSIVE adyacentes(fecha) AS (
+                       SELECT %s::date
+                       UNION ALL
+                       SELECT fecha + %s FROM adyacentes
+                       WHERE fecha <> %s AND (
+                           EXTRACT(ISODOW FROM fecha) IN (6, 7) OR EXISTS (
+                               SELECT 1 FROM tipados t JOIN tipos_fecha tf USING (tipo_id)
+                               WHERE t.usuario_id = %s AND t.fecha = adyacentes.fecha AND tf.nombre = 'Festivo'
+                           )
+                       )
+                   )
+                   SELECT DISTINCT a.es_prevision, p.color
+                   FROM adyacentes d JOIN asignaciones a ON a.fecha = d.fecha
+                   JOIN proyectos p USING (proyecto_id)
+                   WHERE a.usuario_id = %s AND p.nombre = 'Vacaciones'""",
+                (boundary + timedelta(days=step), step, date.min if step < 0 else date.max,
+                 g.user["usuario_id"], g.user["usuario_id"]),
+            ).fetchall()
+        return jsonify(asignaciones=assignments, tipados=typings, notas=notes, contexto_vacaciones=context)
 
     @app.post("/api/new_year")
     @authenticated()
@@ -435,7 +516,25 @@ def create_app(test_config=None):
             ).fetchall()
             if len(kinds) != 1 or kinds[0]["en_borde"] is not False:
                 raise APIError("El tipo Festivo no está configurado correctamente", 409)
-            result = insert_typing(db, date(year, 1, 1), kinds[0]["tipo_id"])
+            first = date(year, 1, 1)
+            days = [first + timedelta(days=offset) for offset in range((date(year, 12, 31) - first).days + 1)
+                    if offset == 0 or (first + timedelta(days=offset)).weekday() >= 5]
+            db.execute("SELECT usuario_id FROM usuarios WHERE usuario_id = %s FOR UPDATE", (g.user["usuario_id"],))
+            conflict = db.execute(
+                """SELECT t.fecha FROM tipados t JOIN tipos_fecha tf USING (tipo_id)
+                   WHERE t.usuario_id = %s AND t.fecha = ANY(%s)
+                   AND (tf.en_borde IS NULL OR tf.en_borde = false)
+                   ORDER BY t.fecha LIMIT 1""",
+                (g.user["usuario_id"], days),
+            ).fetchone()
+            if conflict:
+                raise APIError(f"{conflict['fecha'].isoformat()}: la fecha ya tiene un tipo sin borde", 409)
+            db.execute(
+                """INSERT INTO tipados (usuario_id, fecha, tipo_id)
+                   SELECT %s, fecha, %s FROM unnest(%s::date[]) AS fecha""",
+                (g.user["usuario_id"], kinds[0]["tipo_id"], days),
+            )
+            result = {"usuario_id": g.user["usuario_id"], "fecha": first.isoformat(), "tipo_id": kinds[0]["tipo_id"]}
         return jsonify(result), 201
 
     @app.delete("/api/tipados/<day>/<int:type_id>")
@@ -466,6 +565,25 @@ def get_db():
     if "db" not in g:
         g.db = psycopg.connect(current_app.config["DATABASE_URL"], autocommit=True, row_factory=dict_row)
     return g.db
+
+
+def lock_project(db, project_id):
+    if not db.execute("SELECT proyecto_id FROM proyectos WHERE proyecto_id = %s FOR UPDATE", (project_id,)).fetchone():
+        raise APIError("Proyecto no encontrado", 404)
+
+
+def change_remaining(db, project_id, amount):
+    updated = db.execute(
+        """UPDATE proyectos SET restantes = restantes + %s
+           WHERE proyecto_id = %s AND (
+               restantes IS NULL OR (%s < 0 AND restantes > 0) OR (%s > 0 AND restantes < 880)
+           )
+           RETURNING proyecto_id""",
+        (amount, project_id, amount, amount),
+    ).fetchone()
+    if not updated:
+        message = "El proyecto no tiene días restantes" if amount < 0 else "Los días restantes superarían el máximo de 880"
+        raise APIError(message, 409)
 
 
 def insert_typing(db, day, type_id):
@@ -505,7 +623,7 @@ def authenticated(admin=False):
             if separator != " " or scheme.lower() != "bearer" or not token:
                 raise APIError("Se requiere un token Bearer", 401)
             try:
-                payload = serializer().loads(token, max_age=3600)
+                payload = serializer().loads(token, max_age=TOKEN_MAX_AGE_SECONDS)
                 user_id, version = payload["usuario_id"], payload["version"]
             except (BadSignature, SignatureExpired, KeyError, TypeError):
                 raise APIError("Token inválido o caducado", 401)

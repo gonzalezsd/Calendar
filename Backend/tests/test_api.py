@@ -1,6 +1,7 @@
 import unittest
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from datetime import date, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -72,6 +73,18 @@ class APITests(unittest.TestCase):
         )
         self.login("normal", "newpassword")
 
+    def test_session_valid_for_ten_hours(self):
+        start = 1_700_000_000
+        with patch("itsdangerous.timed.time.time", return_value=start):
+            response = self.client.post("/api/auth/login", json={"nombre_usuario": "admin", "password": "password123"})
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertEqual(response.json["expires_in"], 36000)
+        headers = {"Authorization": "Bearer " + response.json["access_token"]}
+        with patch("itsdangerous.timed.time.time", return_value=start + 35999):
+            self.assertEqual(self.client.get("/api/me", headers=headers).status_code, 200)
+        with patch("itsdangerous.timed.time.time", return_value=start + 36001):
+            self.assertEqual(self.client.get("/api/me", headers=headers).status_code, 401)
+
     def test_per_user_assignment_and_deletion(self):
         self.create_user("other")
         other = self.login("other", "password123")
@@ -86,6 +99,49 @@ class APITests(unittest.TestCase):
         self.assertEqual(self.client.post("/api/asignaciones", headers=other, json=assignment).status_code, 201)
         self.assertEqual(self.client.delete(path, headers=other).status_code, 204)
         self.assertEqual(self.client.delete(path, headers=self.admin).status_code, 204)
+
+    def test_notes_are_unique_private_editable_and_expose_their_year(self):
+        self.create_user("other")
+        other = self.login("other", "password123")
+        path = "/api/notas/2031-02-03"
+        self.assertEqual(self.client.put(path, json={"texto": "sin sesión"}).status_code, 401)
+        response = self.client.put(path, headers=self.admin, json={"texto": "Primera\nnota"})
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertEqual(response.json, {"fecha": "2031-02-03", "texto": "Primera\nnota"})
+        self.assertEqual(self.client.put(path, headers=self.admin, json={"texto": " Editada "}).status_code, 200)
+        self.assertEqual(self.client.put(path, headers=other, json={"texto": "Privada"}).status_code, 200)
+        self.assertEqual(self.client.get("/api/calendario/2031", headers=self.admin).json["notas"],
+                         [{"fecha": "2031-02-03", "texto": " Editada "}])
+        self.assertEqual(self.client.get("/api/calendario/2031", headers=other).json["notas"],
+                         [{"fecha": "2031-02-03", "texto": "Privada"}])
+        self.assertEqual(self.client.get("/api/calendario/2032", headers=self.admin).json["notas"], [])
+        self.assertEqual(self.client.get("/api/get_years", headers=self.admin).json["years"], [2031])
+        with psycopg.connect(self.url, autocommit=True) as db:
+            with self.assertRaises(psycopg.errors.UniqueViolation):
+                db.execute("INSERT INTO notas (usuario_id, fecha, texto) VALUES (1, '2031-02-03', 'duplicada')")
+        self.assertEqual(self.client.delete(path, headers=self.admin).status_code, 204)
+        self.assertEqual(self.client.delete(path, headers=self.admin).status_code, 404)
+        self.assertEqual(self.client.get("/api/get_years", headers=self.admin).json["years"], [])
+        self.assertEqual(self.client.get("/api/calendario/2031", headers=other).json["notas"][0]["texto"], "Privada")
+
+    def test_notes_reject_invalid_input_without_changing_existing_note(self):
+        path = "/api/notas/2031-02-03"
+        self.assertEqual(self.client.put(path, headers=self.admin, json={"texto": "Original"}).status_code, 200)
+        for data in ({}, {"texto": None}, {"texto": ""}, {"texto": " \n\t"}, {"texto": "nul\u0000byte"},
+                     {"texto": 1}, {"texto": "x", "usuario_id": 2}):
+            with self.subTest(data=data):
+                self.assertEqual(self.client.put(path, headers=self.admin, json=data).status_code, 400)
+        self.assertEqual(self.client.put("/api/notas/2031-02-30", headers=self.admin, json={"texto": "x"}).status_code, 400)
+        self.assertEqual(self.client.get("/api/calendario/2031", headers=self.admin).json["notas"][0]["texto"], "Original")
+
+    def test_note_migration_for_existing_schema(self):
+        with psycopg.connect(self.url, autocommit=True) as db:
+            db.execute("DROP TABLE notas")
+            db.execute((ROOT / "DB/05_crear_notas.sql").read_text())
+        response = self.client.put("/api/notas/2031-02-03", headers=self.admin, json={"texto": "Migrada"})
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertEqual(self.client.get("/api/calendario/2031", headers=self.admin).json["notas"],
+                         [{"fecha": "2031-02-03", "texto": "Migrada"}])
 
     def test_confirm_forecast_and_merge_existing_assignment(self):
         project = self.client.post("/api/proyectos", headers=self.admin, json={"nombre": "Proyecto"})
@@ -112,6 +168,89 @@ class APITests(unittest.TestCase):
         self.assertEqual(self.client.post(f"/api/asignaciones/2026-02-30/{project_id}/confirmar", headers=self.admin).status_code, 400)
         self.assertEqual(self.client.post(url).status_code, 401)
 
+    def test_remaining_days_for_confirmations_and_deletions(self):
+        project_id = self.client.post(
+            "/api/proyectos", headers=self.admin, json={"nombre": "Limitado", "restantes": 2}
+        ).json["proyecto_id"]
+
+        def remaining():
+            return next(p["restantes"] for p in self.client.get("/api/proyectos", headers=self.admin).json
+                        if p["proyecto_id"] == project_id)
+
+        def assign(day, forecast):
+            return self.client.post("/api/asignaciones", headers=self.admin, json={
+                "fecha": day, "proyecto_id": project_id, "es_prevision": forecast
+            })
+
+        self.assertEqual(assign("2026-01-01", False).status_code, 201)
+        self.assertEqual(remaining(), 1)
+        self.assertEqual(assign("2026-01-01", False).status_code, 409)
+        self.assertEqual(assign("2026-01-01", True).status_code, 201)
+        self.assertEqual(self.client.post(f"/api/asignaciones/2026-01-01/{project_id}/confirmar", headers=self.admin).status_code, 200)
+        self.assertEqual(remaining(), 1)
+        self.assertEqual(assign("2026-01-02", True).status_code, 201)
+        self.assertEqual(self.client.post(f"/api/asignaciones/2026-01-02/{project_id}/confirmar", headers=self.admin).status_code, 200)
+        self.assertEqual(remaining(), 0)
+        self.assertEqual(assign("2026-01-02", True).status_code, 201)
+        self.assertEqual(self.client.post(f"/api/asignaciones/2026-01-02/{project_id}/confirmar", headers=self.admin).status_code, 200)
+        self.assertEqual(remaining(), 0)
+        self.assertEqual(assign("2026-01-03", True).status_code, 201)
+        self.assertEqual(self.client.post(f"/api/asignaciones/2026-01-03/{project_id}/confirmar", headers=self.admin).status_code, 409)
+        self.assertEqual(assign("2026-01-04", False).status_code, 409)
+        assignments = self.client.get("/api/calendario/2026", headers=self.admin).json["asignaciones"]
+        self.assertTrue(any(a["fecha"] == "2026-01-03" and a["es_prevision"] for a in assignments))
+        self.assertFalse(any(a["fecha"] == "2026-01-04" for a in assignments))
+        self.assertEqual(self.client.delete(f"/api/asignaciones/2026-01-03/{project_id}/true", headers=self.admin).status_code, 204)
+        self.assertEqual(remaining(), 0)
+        self.assertEqual(self.client.delete(f"/api/asignaciones/2026-01-01/{project_id}/false", headers=self.admin).status_code, 204)
+        self.assertEqual(remaining(), 1)
+        self.assertEqual(self.client.delete(f"/api/asignaciones/2026-01-01/{project_id}/false", headers=self.admin).status_code, 404)
+        self.assertEqual(remaining(), 1)
+        self.client.patch(f"/api/proyectos/{project_id}", headers=self.admin, json={"restantes": 880})
+        self.assertEqual(self.client.delete(f"/api/asignaciones/2026-01-02/{project_id}/false", headers=self.admin).status_code, 409)
+        self.assertEqual(remaining(), 880)
+        self.assertTrue(any(a["fecha"] == "2026-01-02" for a in self.client.get(
+            "/api/calendario/2026", headers=self.admin).json["asignaciones"]))
+
+    def test_multiple_remaining_days_are_atomic(self):
+        limited = self.client.post("/api/proyectos", headers=self.admin, json={"restantes": 1}).json["proyecto_id"]
+        unlimited = self.client.post("/api/proyectos", headers=self.admin, json={"restantes": None}).json["proyecto_id"]
+        type_id = self.client.post("/api/tipos-fecha", headers=self.admin, json={"en_borde": True}).json["tipo_id"]
+        payload = {"fechas": ["2026-02-01", "2026-02-02"], "proyectos": [limited, unlimited],
+                   "tipos": [type_id], "es_prevision": False}
+        response = self.client.post("/api/asignaciones/multiples", headers=self.admin, json=payload)
+        self.assertEqual(response.status_code, 409, response.json)
+        calendar = self.client.get("/api/calendario/2026", headers=self.admin).json
+        self.assertEqual((calendar["asignaciones"], calendar["tipados"]), ([], []))
+        projects = {p["proyecto_id"]: p["restantes"] for p in self.client.get("/api/proyectos", headers=self.admin).json}
+        self.assertEqual(projects[limited], 1)
+        self.assertIsNone(projects[unlimited])
+        self.client.patch(f"/api/proyectos/{limited}", headers=self.admin, json={"restantes": 2})
+        self.assertEqual(self.client.post("/api/asignaciones/multiples", headers=self.admin, json=payload).status_code, 201)
+        projects = {p["proyecto_id"]: p["restantes"] for p in self.client.get("/api/proyectos", headers=self.admin).json}
+        self.assertEqual(projects[limited], 0)
+        self.assertIsNone(projects[unlimited])
+        self.assertEqual(self.client.delete(f"/api/asignaciones/2026-02-01/{unlimited}/false", headers=self.admin).status_code, 204)
+        projects = {p["proyecto_id"]: p["restantes"] for p in self.client.get("/api/proyectos", headers=self.admin).json}
+        self.assertIsNone(projects[unlimited])
+
+    def test_remaining_days_are_shared_and_safe_under_concurrency(self):
+        project_id = self.client.post("/api/proyectos", headers=self.admin, json={"restantes": 1}).json["proyecto_id"]
+        self.create_user("other")
+        other = self.login("other", "password123")
+
+        def assign(token):
+            with self.app.test_client() as client:
+                return client.post("/api/asignaciones", headers=token, json={
+                    "fecha": "2026-01-01", "proyecto_id": project_id, "es_prevision": False
+                }).status_code
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            self.assertEqual(sorted(executor.map(assign, (self.admin, other))), [201, 409])
+        project = next(p for p in self.client.get("/api/proyectos", headers=self.admin).json
+                       if p["proyecto_id"] == project_id)
+        self.assertEqual(project["restantes"], 0)
+
     def test_multiple_assignments(self):
         project_ids = [
             self.client.post("/api/proyectos", headers=self.admin, json={"nombre": name}).json["proyecto_id"]
@@ -136,7 +275,8 @@ class APITests(unittest.TestCase):
         self.assertEqual(len(calendar["tipados"]), 4)
         self.create_user("other")
         other = self.login("other", "password123")
-        self.assertEqual(self.client.get("/api/calendario/2026", headers=other).json, {"asignaciones": [], "tipados": []})
+        calendar = self.client.get("/api/calendario/2026", headers=other).json
+        self.assertEqual((calendar["asignaciones"], calendar["tipados"]), ([], []))
         self.assertEqual(self.client.post("/api/asignaciones/multiples", json=payload).status_code, 401)
         for invalid in (
             {**payload, "fechas": ["2026-01-02"]},
@@ -149,7 +289,7 @@ class APITests(unittest.TestCase):
                 self.assertEqual(self.client.post("/api/asignaciones/multiples", headers=self.admin, json=invalid).status_code, 400)
 
     def test_multiple_assignments_roll_back_on_conflict(self):
-        project_id = self.client.post("/api/proyectos", headers=self.admin, json={"nombre": "Proyecto"}).json["proyecto_id"]
+        project_id = self.client.post("/api/proyectos", headers=self.admin, json={"nombre": "Proyecto", "restantes": 5}).json["proyecto_id"]
         type_id = self.client.post("/api/tipos-fecha", headers=self.admin, json={"en_borde": True}).json["tipo_id"]
         existing_type = self.client.post("/api/tipos-fecha", headers=self.admin, json={"en_borde": True}).json["tipo_id"]
         payload = {
@@ -166,6 +306,8 @@ class APITests(unittest.TestCase):
         calendar = self.client.get("/api/calendario/2026", headers=self.admin).json
         self.assertEqual(len(calendar["asignaciones"]), 1)
         self.assertEqual(calendar["tipados"], [])
+        project = next(p for p in self.client.get("/api/proyectos", headers=self.admin).json if p["proyecto_id"] == project_id)
+        self.assertEqual(project["restantes"], 4)
 
         self.assertEqual(self.client.delete(f"/api/asignaciones/2026-02-02/{project_id}/false", headers=self.admin).status_code, 204)
         self.assertEqual(self.client.post("/api/tipados", headers=self.admin, json={"fecha": "2026-02-02", "tipo_id": existing_type}).status_code, 201)
@@ -175,6 +317,8 @@ class APITests(unittest.TestCase):
         calendar = self.client.get("/api/calendario/2026", headers=self.admin).json
         self.assertEqual(calendar["asignaciones"], [])
         self.assertEqual(len(calendar["tipados"]), 1)
+        project = next(p for p in self.client.get("/api/proyectos", headers=self.admin).json if p["proyecto_id"] == project_id)
+        self.assertEqual(project["restantes"], 5)
 
     def test_multiple_assignments_serialize_with_single_typing(self):
         ids = [
@@ -334,6 +478,12 @@ class APITests(unittest.TestCase):
         response = self.client.post("/api/new_year", headers=self.admin, json={"year": 2026})
         self.assertEqual(response.status_code, 201, response.json)
         self.assertEqual(response.json, {"usuario_id": 1, "fecha": "2026-01-01", "tipo_id": kind_id})
+        dates = {item["fecha"] for item in self.client.get("/api/calendario/2026", headers=self.admin).json["tipados"]}
+        first = date(2026, 1, 1)
+        expected = {first.isoformat()}
+        expected.update((first + timedelta(days=offset)).isoformat() for offset in range(365)
+                        if (first + timedelta(days=offset)).weekday() >= 5)
+        self.assertEqual(dates, expected)
         self.assertEqual(self.client.post("/api/new_year", headers=self.admin, json={"year": 2026}).status_code, 409)
         for invalid in (0, 10000, True, "2026", 2026.5):
             with self.subTest(year=invalid):
@@ -341,6 +491,54 @@ class APITests(unittest.TestCase):
         self.assertEqual(self.client.post("/api/tipos-fecha", headers=self.admin, json={"nombre": "Festivo", "en_borde": False}).status_code, 409)
         self.assertEqual(self.client.patch(f"/api/tipos-fecha/{kind_id}", headers=self.admin, json={"nombre": "Otro"}).status_code, 409)
         self.assertEqual(self.client.patch(f"/api/tipos-fecha/{kind_id}", headers=self.admin, json={"en_borde": True}).status_code, 409)
+
+    def test_new_year_leap_year_and_weekend_conflict_are_atomic(self):
+        response = self.client.post("/api/new_year", headers=self.admin, json={"year": 2028})
+        self.assertEqual(response.status_code, 201, response.json)
+        dates = [item["fecha"] for item in self.client.get("/api/calendario/2028", headers=self.admin).json["tipados"]]
+        first = date(2028, 1, 1)
+        expected = {(first + timedelta(days=offset)).isoformat() for offset in range(366)
+                    if (first + timedelta(days=offset)).weekday() >= 5}
+        self.assertEqual(set(dates), expected)
+        self.assertEqual(len(dates), len(expected))
+        inside = self.client.post("/api/tipos-fecha", headers=self.admin, json={"en_borde": False}).json["tipo_id"]
+        self.assertEqual(self.client.post("/api/tipados", headers=self.admin, json={
+            "fecha": "2029-01-06", "tipo_id": inside
+        }).status_code, 201)
+        response = self.client.post("/api/new_year", headers=self.admin, json={"year": 2029})
+        self.assertEqual(response.status_code, 409, response.json)
+        self.assertIn("2029-01-06", response.json["error"])
+        self.assertEqual([item["fecha"] for item in self.client.get(
+            "/api/calendario/2029", headers=self.admin).json["tipados"]], ["2029-01-06"])
+
+    def test_vacation_context_across_years_and_user_isolation(self):
+        vacation_id = next(p["proyecto_id"] for p in self.client.get("/api/proyectos", headers=self.admin).json
+                           if p["nombre"] == "Vacaciones")
+        holiday_id = next(t["tipo_id"] for t in self.client.get("/api/tipos-fecha", headers=self.admin).json
+                          if t["nombre"] == "Festivo")
+        for day in ("2025-12-31", "2027-01-01"):
+            self.assertEqual(self.client.post("/api/tipados", headers=self.admin,
+                                              json={"fecha": day, "tipo_id": holiday_id}).status_code, 201)
+        for day, forecast in (("2025-12-30", True), ("2027-01-04", False), ("2027-01-05", True)):
+            self.assertEqual(self.client.post("/api/asignaciones", headers=self.admin, json={
+                "fecha": day, "proyecto_id": vacation_id, "es_prevision": forecast
+            }).status_code, 201)
+        context = self.client.get("/api/calendario/2026", headers=self.admin).json["contexto_vacaciones"]
+        self.assertEqual(context["anterior"], [{"color": "#FF7800", "es_prevision": True}])
+        self.assertEqual(context["posterior"], [{"color": "#FF7800", "es_prevision": False}])
+        self.assertEqual(self.client.post("/api/asignaciones", headers=self.admin, json={
+            "fecha": "2027-01-02", "proyecto_id": vacation_id, "es_prevision": True
+        }).status_code, 201)
+        context = self.client.get("/api/calendario/2026", headers=self.admin).json["contexto_vacaciones"]
+        self.assertCountEqual(context["posterior"], [
+            {"color": "#FF7800", "es_prevision": False}, {"color": "#FF7800", "es_prevision": True}
+        ])
+        self.create_user("other")
+        other = self.login("other", "password123")
+        self.assertEqual(self.client.get("/api/calendario/2026", headers=other).json["contexto_vacaciones"],
+                         {"anterior": [], "posterior": []})
+        for year in (1, 9999):
+            self.assertEqual(self.client.get(f"/api/calendario/{year}", headers=self.admin).status_code, 200)
 
     def test_seed_rejects_conflicting_existing_data(self):
         seed = (ROOT / "DB/03_crear_tipo_festivo.sql").read_text()
@@ -431,7 +629,8 @@ class APITests(unittest.TestCase):
         other_calendar = self.client.get("/api/calendario/2026", headers=other).json
         self.assertEqual(other_calendar["asignaciones"], [])
         self.assertEqual(other_calendar["tipados"][0]["nombre"], "Festivo")
-        self.assertEqual(self.client.get("/api/calendario/2027", headers=other).json, {"asignaciones": [], "tipados": []})
+        calendar = self.client.get("/api/calendario/2027", headers=other).json
+        self.assertEqual((calendar["asignaciones"], calendar["tipados"]), ([], []))
         self.assertEqual(self.client.get("/api/calendario/10000", headers=other).status_code, 400)
 
 

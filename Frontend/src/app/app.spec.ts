@@ -34,7 +34,7 @@ describe('Calendar application', () => {
     loginComponent.loginName = 'admin';
     loginComponent.loginPassword = 'password123';
     void loginComponent.login({ invalid: false } as NgForm);
-    http.expectOne('/api/auth/login').flush({ access_token: 'token', expires_in: 3600 });
+    http.expectOne('/api/auth/login').flush({ access_token: 'token', expires_in: 36000 });
     flushMicrotasks();
     const me = http.expectOne('/api/me');
     expect(me.request.headers.get('Authorization')).toBe('Bearer token');
@@ -43,7 +43,7 @@ describe('Calendar application', () => {
     http.expectOne('/api/get_years').flush({ years: [2025, 2026] });
     flushMicrotasks();
     http.expectOne('/api/calendario/2026').flush({
-      asignaciones: [{ fecha: '2026-03-01', proyecto_id: 1, nombre: 'Trabajo', color: '#123456', es_prevision: false }],
+      notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [{ fecha: '2026-03-01', proyecto_id: 1, nombre: 'Trabajo', color: '#123456', es_prevision: false }],
       tipados: [
         { fecha: '2026-01-01', tipo_id: 1, nombre: 'Festivo', color: '#FF0000', en_borde: false },
         { fecha: '2026-01-02', tipo_id: 2, nombre: 'Especial', color: '#00AA00', en_borde: true }
@@ -59,6 +59,140 @@ describe('Calendar application', () => {
     context.fillRect(0, 0, 1, 1);
     return Array.from(context.getImageData(0, 0, 1, 1).data).slice(0, 3);
   }
+
+  it('creates, edits and removes a private day note and its calendar marker', fakeAsync(() => {
+    const fixture = TestBed.createComponent(App);
+    fixture.detectChanges();
+    login(fixture);
+    fixture.detectChanges();
+    const root: HTMLElement = fixture.nativeElement;
+    const day = () => root.querySelector<HTMLButtonElement>('.day[aria-label="2026-01-03"]')!;
+    const textarea = () => root.querySelector<HTMLTextAreaElement>('#day-note')!;
+    const save = () => Array.from(root.querySelectorAll<HTMLButtonElement>('.day-panel button'))
+      .find(button => button.textContent?.trim() === 'Guardar nota')!;
+    const edit = (value: string) => {
+      textarea().value = value;
+      textarea().dispatchEvent(new Event('input'));
+      fixture.detectChanges();
+    };
+    expect(day().querySelector('.note-indicator')).toBeNull();
+    day().click();
+    http.expectOne('/api/proyectos').flush([]);
+    http.expectOne('/api/tipos-fecha').flush([]);
+    flushMicrotasks();
+    fixture.detectChanges();
+    flushMicrotasks();
+    edit('Primera\nnota');
+    save().click();
+    const failed = http.expectOne('/api/notas/2026-01-03');
+    expect(failed.request.method).toBe('PUT');
+    expect(failed.request.body).toEqual({ texto: 'Primera\nnota' });
+    failed.flush({ error: 'Error al guardar' }, { status: 500, statusText: 'Error' });
+    flushMicrotasks();
+    fixture.detectChanges();
+    expect(root.querySelector('.day-panel')?.textContent).toContain('Error al guardar');
+    expect(textarea().value).toBe('Primera\nnota');
+    expect(day().querySelector('.note-indicator')).toBeNull();
+    save().click();
+    http.expectOne('/api/notas/2026-01-03').flush({ fecha: '2026-01-03', texto: 'Primera\nnota' });
+    flushMicrotasks();
+    fixture.detectChanges();
+    expect(day().querySelector('.note-indicator')?.textContent).toBe('Nota');
+    expect(day().getAttribute('aria-describedby')).toBe('note-indicator-2026-01-03 note-preview-2026-01-03');
+    const preview = day().querySelector<HTMLElement>('.note-preview')!;
+    expect(preview.textContent).toBe('Primera\nnota');
+    expect(getComputedStyle(preview).display).toBe('none');
+    day().focus();
+    expect(getComputedStyle(preview).display).toBe('block');
+    expect(getComputedStyle(preview).whiteSpace).toBe('pre-wrap');
+    day().blur();
+    expect(getComputedStyle(preview).display).toBe('none');
+    expect(save().disabled).toBeTrue();
+    edit('Editada');
+    save().click();
+    http.expectOne('/api/notas/2026-01-03').flush({ fecha: '2026-01-03', texto: 'Editada' });
+    flushMicrotasks();
+    fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('[aria-label="Cerrar detalle del día"]')!.click();
+    day().click();
+    http.expectOne('/api/proyectos').flush([]);
+    http.expectOne('/api/tipos-fecha').flush([]);
+    flushMicrotasks();
+    fixture.detectChanges();
+    expect(textarea().value).toBe('Editada');
+    edit('  ');
+    save().click();
+    const deleted = http.expectOne('/api/notas/2026-01-03');
+    expect(deleted.request.method).toBe('DELETE');
+    deleted.flush(null, { status: 204, statusText: 'No Content' });
+    flushMicrotasks();
+    fixture.detectChanges();
+    flushMicrotasks();
+    expect(day().querySelector('.note-indicator')).toBeNull();
+    expect(textarea().value).toBe('');
+    void fixture.componentInstance.state.loadCalendar(2026);
+    http.expectOne('/api/calendario/2026').flush({
+      asignaciones: [], tipados: [], notas: [{ fecha: '2026-01-04', texto: 'Persistida <b>literal</b>' }],
+      contexto_vacaciones: { anterior: [], posterior: [] }
+    });
+    flushMicrotasks();
+    fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('[aria-label="Ver Enero 2026"]')!.click();
+    fixture.detectChanges();
+    const persistedDay = root.querySelector<HTMLButtonElement>('.day[aria-label="2026-01-04"]')!;
+    expect(persistedDay.querySelector('.note-indicator')?.textContent).toBe('Nota');
+    expect(persistedDay.querySelector('.note-preview')?.textContent).toBe('Persistida <b>literal</b>');
+    expect(persistedDay.querySelector('.note-preview b')).toBeNull();
+    persistedDay.click();
+    http.expectOne('/api/proyectos').flush([]);
+    http.expectOne('/api/tipos-fecha').flush([]);
+    flushMicrotasks();
+    fixture.detectChanges();
+    flushMicrotasks();
+    expect(textarea().value).toBe('Persistida <b>literal</b>');
+    fixture.componentInstance.state.logout();
+  }));
+
+  it('warns before discarding an unsaved note on day, panel, year and view changes', fakeAsync(() => {
+    const fixture = TestBed.createComponent(App);
+    fixture.detectChanges();
+    login(fixture);
+    fixture.detectChanges();
+    const root: HTMLElement = fixture.nativeElement;
+    root.querySelector<HTMLButtonElement>('.day[aria-label="2026-01-03"]')!.click();
+    http.expectOne('/api/proyectos').flush([]);
+    http.expectOne('/api/tipos-fecha').flush([]);
+    flushMicrotasks();
+    fixture.detectChanges();
+    const textarea = root.querySelector<HTMLTextAreaElement>('#day-note')!;
+    textarea.value = 'Sin guardar';
+    textarea.dispatchEvent(new Event('input'));
+    fixture.detectChanges();
+    const confirmation = spyOn(window, 'confirm').and.returnValue(false);
+    root.querySelector<HTMLButtonElement>('.day[aria-label="2026-01-04"]')!.click();
+    root.querySelector<HTMLButtonElement>('[aria-label="Cerrar detalle del día"]')!.click();
+    root.querySelector<HTMLButtonElement>('#annual-info-button')!.click();
+    const year = root.querySelector<HTMLSelectElement>('.year-selector select')!;
+    year.value = '2025';
+    year.dispatchEvent(new Event('change'));
+    fixture.componentInstance.navigate('proyectos');
+    fixture.componentInstance.logout();
+    fixture.detectChanges();
+    expect(confirmation).toHaveBeenCalledTimes(6);
+    expect(year.value).toBe('2026');
+    expect(root.querySelector('#day-panel-title')?.textContent).toBe('2026-01-03');
+    expect(root.querySelector<HTMLTextAreaElement>('#day-note')?.value).toBe('Sin guardar');
+    expect(fixture.componentInstance.state.user).not.toBeNull();
+    const beforeUnload = new Event('beforeunload', { cancelable: true });
+    const calendar: CalendarComponent = fixture.debugElement.query(By.directive(CalendarComponent)).componentInstance;
+    calendar.beforeUnload(beforeUnload as BeforeUnloadEvent);
+    expect(beforeUnload.defaultPrevented).toBeTrue();
+    confirmation.and.returnValue(true);
+    root.querySelector<HTMLButtonElement>('[aria-label="Cerrar detalle del día"]')!.click();
+    fixture.detectChanges();
+    expect(root.querySelector('.day-panel')).toBeNull();
+    fixture.componentInstance.state.logout();
+  }));
 
   it('authenticates, displays the calendar and loads a selected year', fakeAsync(() => {
     const fixture = TestBed.createComponent(App);
@@ -77,7 +211,7 @@ describe('Calendar application', () => {
     expect(getComputedStyle(borderedDay).outlineColor).toBe('rgb(0, 170, 0)');
     expect(getComputedStyle(borderedDay).outlineWidth).toBe('2px');
     void fixture.componentInstance.state.changeYear('2025');
-    http.expectOne('/api/calendario/2025').flush({ asignaciones: [], tipados: [] });
+    http.expectOne('/api/calendario/2025').flush({ notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [] });
     flushMicrotasks();
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('.year-title').textContent.trim()).toBe('2025');
@@ -137,13 +271,16 @@ describe('Calendar application', () => {
     const vacation = { proyecto_id: 2, nombre: 'Vacaciones', color: '#FF7800', laborable: false };
     const other = { proyecto_id: 3, nombre: 'Otro', color: '#000000', laborable: true };
     http.expectOne('/api/calendario/2024').flush({
-      asignaciones: [
+      notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [
         { ...work, fecha: '2024-01-01', es_prevision: false },
         { ...work, fecha: '2024-01-01', es_prevision: true },
+        { ...other, fecha: '2024-01-01', es_prevision: false },
         { ...vacation, fecha: '2024-01-01', es_prevision: false },
         { ...vacation, fecha: '2024-01-02', es_prevision: true },
+        { ...vacation, fecha: '2024-01-02', es_prevision: false },
         { ...work, fecha: '2024-01-03', es_prevision: true },
         { ...other, fecha: '2024-01-03', es_prevision: false },
+        { ...work, fecha: '2024-01-04', es_prevision: true },
         { ...work, fecha: '2024-01-06', es_prevision: false }
       ],
       tipados: [
@@ -155,6 +292,11 @@ describe('Calendar application', () => {
     flushMicrotasks();
     fixture.detectChanges();
     const root: HTMLElement = fixture.nativeElement;
+    expect(root.querySelector('[aria-label="Enero 2024"] h3 span')?.textContent).toBe('(3)');
+    expect(root.querySelector('[aria-label="Febrero 2024"] h3 span')?.textContent).toBe('(0)');
+    const january = root.querySelector<HTMLElement>('[aria-label="Enero 2024"]')!;
+    expect(Math.abs(january.querySelector('h3 span')!.getBoundingClientRect().right -
+      january.querySelector('.month-grid')!.getBoundingClientRect().right)).toBeLessThan(1);
     root.querySelector<HTMLButtonElement>('#annual-info-button')!.click();
     http.expectOne('/api/proyectos').flush([
       { ...work, descripcion: '', duracion: 10, restantes: 7 },
@@ -182,14 +324,17 @@ describe('Calendar application', () => {
     const projects = panel().querySelectorAll('.annual-project');
     expect(projects[0].textContent).toContain('Duración inicial: 10');
     expect(projects[0].textContent).toContain('Días restantes: 7');
-    expect(projects[0].textContent).toContain('Días asignados: 3');
+    expect(projects[0].textContent).toContain('Días asignados: 4');
+    expect(projects[0].textContent).toContain('Días trabajados: 2');
     expect(projects[1].textContent).toContain('Días asignados: 2');
+    expect(projects[1].textContent).toContain('Días trabajados: 2');
+    expect(projects[2].textContent).toContain('Días trabajados: 2');
     expect(projects[1].textContent).toContain('Duración inicial: —');
 
     void state.changeYear('2025');
     fixture.detectChanges();
     expect(panel().textContent).toContain('Cargando información anual');
-    http.expectOne('/api/calendario/2025').flush({ asignaciones: [], tipados: [] });
+    http.expectOne('/api/calendario/2025').flush({ notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [] });
     flushMicrotasks();
     fixture.detectChanges();
     expect(panel().textContent).toContain('Información anual 2025');
@@ -199,11 +344,97 @@ describe('Calendar application', () => {
 
     root.querySelector<HTMLButtonElement>('[aria-label="Ver Enero 2025"]')!.click();
     fixture.detectChanges();
-    expect(root.querySelector('#annual-info-button')).toBeNull();
+    expect(root.querySelector('.month-card h3 span')?.textContent).toBe('(0)');
+    expect(root.querySelector('#annual-info-button')?.textContent).toContain('Información mensual');
     expect(root.querySelector('.annual-info')).toBeNull();
     root.querySelector<HTMLButtonElement>('.section-heading .secondary')!.click();
     fixture.detectChanges();
     expect(root.querySelector('#annual-info-button')).not.toBeNull();
+    state.logout();
+  }));
+
+  it('shows monthly totals only for the selected month and follows the selected year', fakeAsync(() => {
+    const fixture = TestBed.createComponent(App);
+    fixture.detectChanges();
+    login(fixture);
+    const state = fixture.componentInstance.state;
+    state.years = [2024, 2025, 2026];
+    void state.changeYear('2024');
+    const work = { proyecto_id: 1, nombre: 'Trabajo', color: '#123456', laborable: true };
+    const vacation = { proyecto_id: 2, nombre: 'Vacaciones', color: '#FF7800', laborable: false };
+    http.expectOne('/api/calendario/2024').flush({
+      notas: [], contexto_vacaciones: { anterior: [], posterior: [] },
+      asignaciones: [
+        { ...vacation, fecha: '2024-01-10', es_prevision: false },
+        { ...work, fecha: '2024-03-10', es_prevision: false },
+        { ...vacation, fecha: '2024-02-02', es_prevision: true },
+        { ...work, fecha: '2024-02-03', es_prevision: true },
+        { ...work, fecha: '2024-02-04', es_prevision: true },
+        { ...work, fecha: '2024-02-04', es_prevision: false }
+      ],
+      tipados: [
+        { fecha: '2024-01-10', tipo_id: 1, nombre: 'Festivo', color: '#FF0000', en_borde: false },
+        { fecha: '2024-02-01', tipo_id: 1, nombre: 'Festivo', color: '#FF0000', en_borde: false },
+        { fecha: '2024-02-04', tipo_id: 2, nombre: 'Especial', color: '#00AA00', en_borde: true }
+      ]
+    });
+    flushMicrotasks();
+    fixture.detectChanges();
+    const root: HTMLElement = fixture.nativeElement;
+    root.querySelector<HTMLButtonElement>('[aria-label="Ver Febrero 2024"]')!.click();
+    fixture.detectChanges();
+    const button = root.querySelector<HTMLButtonElement>('#annual-info-button')!;
+    expect(button.textContent).toContain('Información mensual');
+    expect(root.querySelector('#bulk-assign-button')).toBeNull();
+    button.click();
+    http.expectOne('/api/proyectos').flush([
+      { ...work, descripcion: '', duracion: 10, restantes: 7 },
+      { ...vacation, descripcion: '', duracion: null, restantes: null }
+    ]);
+    http.expectOne('/api/tipos-fecha').flush([
+      { tipo_id: 1, nombre: 'Festivo', color: '#FF0000', en_borde: false },
+      { tipo_id: 2, nombre: 'Especial', color: '#00AA00', en_borde: true },
+      { tipo_id: 3, nombre: 'Sin asignar', color: '#000000', en_borde: true }
+    ]);
+    flushMicrotasks();
+    fixture.detectChanges();
+    const panel = () => root.querySelector<HTMLElement>('.annual-info')!;
+    expect(panel().textContent).toContain('Información mensual Febrero 2024');
+    expect(panel().textContent).toContain('Días laborables: 27');
+    expect(panel().textContent).toContain('Días trabajados: 1');
+    const types = panel().querySelectorAll('[aria-labelledby="annual-types-title"] .day-panel-item');
+    expect(types[0].textContent).toContain('1 día');
+    expect(types[1].textContent).toContain('1 día');
+    expect(types[2].textContent).toContain('0 días');
+    const projects = panel().querySelectorAll('.annual-project');
+    expect(projects[0].textContent).toContain('Duración inicial: 10');
+    expect(projects[0].textContent).toContain('Días restantes: 7');
+    expect(projects[0].textContent).toContain('Días asignados: 2');
+    expect(projects[0].textContent).toContain('Días trabajados: 1');
+    expect(projects[1].textContent).toContain('Días asignados: 1');
+    expect(projects[1].textContent).toContain('Días trabajados: 0');
+
+    void state.changeYear('2025');
+    fixture.detectChanges();
+    expect(panel().textContent).toContain('Cargando información mensual');
+    http.expectOne('/api/calendario/2025').flush({ notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [] });
+    flushMicrotasks();
+    fixture.detectChanges();
+    expect(panel().textContent).toContain('Información mensual Febrero 2025');
+    expect(panel().textContent).toContain('Días laborables: 28');
+    expect(panel().textContent).toContain('Días trabajados: 0');
+    root.querySelector<HTMLButtonElement>('[aria-label="Cerrar información mensual"]')!.click();
+    fixture.detectChanges();
+    expect(document.activeElement).toBe(button);
+    button.click();
+    http.expectOne('/api/proyectos').flush([]);
+    http.expectOne('/api/tipos-fecha').flush([]);
+    flushMicrotasks();
+    fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('.section-heading .secondary')!.click();
+    fixture.detectChanges();
+    expect(root.querySelector('.annual-info')).toBeNull();
+    expect(button.textContent).toContain('Información anual');
     state.logout();
   }));
 
@@ -241,7 +472,7 @@ describe('Calendar application', () => {
     root.querySelector<HTMLButtonElement>('[aria-label="Ver Febrero 2026"]')!.click();
     fixture.detectChanges();
     void fixture.componentInstance.state.changeYear('2025');
-    http.expectOne('/api/calendario/2025').flush({ asignaciones: [], tipados: [] });
+    http.expectOne('/api/calendario/2025').flush({ notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [] });
     flushMicrotasks();
     fixture.detectChanges();
     expect(root.querySelector('.month-card')?.getAttribute('aria-label')).toBe('Febrero 2025');
@@ -254,9 +485,12 @@ describe('Calendar application', () => {
     const fixture = TestBed.createComponent(App);
     fixture.detectChanges();
     login(fixture);
+    fixture.detectChanges();
+    const calendar: CalendarComponent = fixture.debugElement.query(By.directive(CalendarComponent)).componentInstance;
+    spyOnProperty(calendar, 'todayDate', 'get').and.returnValue('2025-01-01');
     void fixture.componentInstance.state.changeYear('2025');
     http.expectOne('/api/calendario/2025').flush({
-      asignaciones: [
+      notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [
         { fecha: '2025-01-02', proyecto_id: 1, nombre: 'Trabajo', color: '#123456', es_prevision: false },
         { fecha: '2025-01-03', proyecto_id: 1, nombre: 'Trabajo', color: '#123456', es_prevision: false },
         { fecha: '2025-01-03', proyecto_id: 2, nombre: 'Otro', color: '#abcdef', es_prevision: true },
@@ -280,12 +514,100 @@ describe('Calendar application', () => {
     expect(getComputedStyle(day('2025-01-03')).backgroundColor).toBe('rgb(44, 129, 58)');
     expect(getComputedStyle(day('2025-01-04')).backgroundColor).toBe('rgb(18, 52, 86)');
     expect(getComputedStyle(day('2025-01-05')).backgroundColor).toBe('rgb(156, 163, 175)');
-    expect(backgroundRgb(day('2025-01-06'))).toEqual([65, 93, 120]);
-    expect(backgroundRgb(day('2025-01-07'))).toEqual([86, 154, 97]);
+    expect(backgroundRgb(day('2025-01-06'))).toEqual([136, 154, 171]);
+    expect(backgroundRgb(day('2025-01-07'))).toEqual([150, 192, 156]);
     expect(getComputedStyle(day('2025-01-03')).outlineColor).toBe('rgb(0, 170, 0)');
     expect(getComputedStyle(day('2025-01-03').querySelector('.day-number')!).color).toBe('rgb(255, 0, 0)');
     expect(day('2025-01-03').textContent?.trim()).toBe('3');
     expect(day('2025-01-03').querySelectorAll('.event').length).toBe(0);
+    fixture.componentInstance.state.logout();
+  }));
+
+  it('shades past days without project backgrounds in both views using the local date', fakeAsync(() => {
+    const fixture = TestBed.createComponent(App);
+    fixture.detectChanges();
+    login(fixture);
+    fixture.detectChanges();
+    const calendar: CalendarComponent = fixture.debugElement.query(By.directive(CalendarComponent)).componentInstance;
+    const today = spyOnProperty(calendar, 'todayDate', 'get').and.returnValue('2026-01-03');
+    void fixture.componentInstance.state.loadCalendar(2026);
+    http.expectOne('/api/calendario/2026').flush({
+      notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [
+        { fecha: '2026-01-02', proyecto_id: 1, nombre: 'Trabajo', color: '#123456', laborable: true, es_prevision: false }
+      ],
+      tipados: [
+        { fecha: '2026-01-01', tipo_id: 1, nombre: 'Festivo', color: '#FF0000', en_borde: false }
+      ]
+    });
+    flushMicrotasks();
+    fixture.detectChanges();
+    const root: HTMLElement = fixture.nativeElement;
+    const day = (date: string) => root.querySelector<HTMLElement>(`.day[aria-label="${date}"]`)!;
+    expect(getComputedStyle(day('2026-01-01')).backgroundColor).toBe('rgb(232, 235, 240)');
+    expect(getComputedStyle(day('2026-01-01').querySelector('.day-number')!).color).toBe('rgb(255, 0, 0)');
+    expect(getComputedStyle(day('2026-01-02')).backgroundColor).toBe('rgb(18, 52, 86)');
+    expect(getComputedStyle(day('2026-01-03')).backgroundColor).toBe('rgba(0, 0, 0, 0)');
+    expect(getComputedStyle(day('2026-01-04')).backgroundColor).toBe('rgba(0, 0, 0, 0)');
+    root.querySelector<HTMLButtonElement>('[aria-label="Ver Enero 2026"]')!.click();
+    fixture.detectChanges();
+    expect(day('2026-01-01').classList.contains('past-unassigned')).toBeTrue();
+    today.and.returnValue('2026-01-04');
+    fixture.detectChanges();
+    expect(day('2026-01-03').classList.contains('past-unassigned')).toBeTrue();
+    expect(day('2026-01-04').classList.contains('past-unassigned')).toBeFalse();
+    fixture.componentInstance.state.logout();
+  }));
+
+  it('extends vacation colors across connected holidays and weekends, including year boundaries', fakeAsync(() => {
+    const fixture = TestBed.createComponent(App);
+    fixture.detectChanges();
+    login(fixture);
+    fixture.detectChanges();
+    const calendar: CalendarComponent = fixture.debugElement.query(By.directive(CalendarComponent)).componentInstance;
+    spyOnProperty(calendar, 'todayDate', 'get').and.returnValue('2026-01-01');
+    const vacation = { proyecto_id: 1, nombre: 'Vacaciones', color: '#FF7800', laborable: false };
+    const assignment = (fecha: string, es_prevision: boolean) => ({ ...vacation, fecha, es_prevision });
+    const holiday = (fecha: string) => ({ fecha, tipo_id: 1, nombre: 'Festivo', color: '#FF0000', en_borde: false });
+    const assignments = [
+      assignment('2026-01-05', true), assignment('2026-01-09', true),
+      assignment('2026-01-12', false), assignment('2026-02-02', false),
+      { fecha: '2026-01-10', proyecto_id: 2, nombre: 'Trabajo', color: '#123456', laborable: true, es_prevision: false }
+    ];
+    const typings = [holiday('2026-01-01'), holiday('2026-01-06'), holiday('2026-12-31')];
+    const context = {
+      anterior: [{ color: '#FF7800', es_prevision: true }],
+      posterior: [{ color: '#FF7800', es_prevision: true }, { color: '#FF7800', es_prevision: false }]
+    };
+    void fixture.componentInstance.state.loadCalendar(2026);
+    http.expectOne('/api/calendario/2026').flush({
+      asignaciones: assignments, tipados: typings, notas: [], contexto_vacaciones: context
+    });
+    flushMicrotasks();
+    fixture.detectChanges();
+    const root: HTMLElement = fixture.nativeElement;
+    const day = (date: string) => root.querySelector<HTMLElement>(`.day[aria-label="${date}"]`)!;
+    for (const date of ['2026-01-01', '2026-01-03', '2026-01-04', '2026-01-06']) {
+      expect(backgroundRgb(day(date))).withContext(date).toEqual([255, 187, 128]);
+    }
+    for (const date of ['2026-01-11', '2026-01-31', '2026-02-01', '2026-12-31']) {
+      expect(getComputedStyle(day(date)).backgroundColor).withContext(date).toBe('rgb(255, 120, 0)');
+    }
+    expect(getComputedStyle(day('2026-01-10')).backgroundColor).toBe('rgb(18, 52, 86)');
+    expect(getComputedStyle(day('2026-01-07')).backgroundColor).toBe('rgba(0, 0, 0, 0)');
+    expect(getComputedStyle(day('2026-01-17')).backgroundColor).toBe('rgba(0, 0, 0, 0)');
+    expect(calendar.state.calendar[0].days.find(item => item?.date === '2026-01-03')?.assignments).toEqual([]);
+    root.querySelector<HTMLButtonElement>('[aria-label="Ver Enero 2026"]')!.click();
+    fixture.detectChanges();
+    expect(backgroundRgb(day('2026-01-03'))).toEqual([255, 187, 128]);
+
+    void fixture.componentInstance.state.loadCalendar(2026);
+    http.expectOne('/api/calendario/2026').flush({
+      asignaciones: assignments.map(item => item.fecha === '2026-01-05' ? { ...item, es_prevision: false } : item),
+      tipados: typings, notas: [], contexto_vacaciones: context
+    });
+    flushMicrotasks();
+    fixture.detectChanges();
+    expect(getComputedStyle(day('2026-01-03')).backgroundColor).toBe('rgb(255, 120, 0)');
     fixture.componentInstance.state.logout();
   }));
 
@@ -315,7 +637,7 @@ describe('Calendar application', () => {
     expect(day('2026-03-01').getAttribute('aria-pressed')).toBe('true');
 
     void fixture.componentInstance.state.loadCalendar(2026);
-    http.expectOne('/api/calendario/2026').flush({ asignaciones: [], tipados: [] });
+    http.expectOne('/api/calendario/2026').flush({ notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [] });
     flushMicrotasks();
     fixture.detectChanges();
     expect(day('2026-01-02').getAttribute('aria-pressed')).toBe('true');
@@ -346,11 +668,11 @@ describe('Calendar application', () => {
     expect(day('2026-01-04').getAttribute('aria-pressed')).toBe('true');
 
     void fixture.componentInstance.state.changeYear('2025');
-    http.expectOne('/api/calendario/2025').flush({ asignaciones: [], tipados: [] });
+    http.expectOne('/api/calendario/2025').flush({ notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [] });
     flushMicrotasks();
     fixture.detectChanges();
     void fixture.componentInstance.state.changeYear('2026');
-    http.expectOne('/api/calendario/2026').flush({ asignaciones: [], tipados: [] });
+    http.expectOne('/api/calendario/2026').flush({ notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [] });
     flushMicrotasks();
     fixture.detectChanges();
     expect(day('2026-01-03').getAttribute('aria-pressed')).toBe('false');
@@ -405,13 +727,13 @@ describe('Calendar application', () => {
     const tipados = ['2026-02-01', '2026-02-02'].map(fecha => ({
       fecha, tipo_id: 2, nombre: 'Especial', color: '#00AA00', en_borde: true
     }));
-    http.expectOne('/api/calendario/2026').flush({ asignaciones, tipados });
+    http.expectOne('/api/calendario/2026').flush({ notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones, tipados });
     flushMicrotasks();
     fixture.detectChanges();
     expect(root.querySelector('.bulk-assign')).toBeNull();
     expect(root.querySelector('#bulk-assign-button')).toBeNull();
     expect(root.querySelector('.day[aria-label="2026-02-01"]')?.getAttribute('aria-pressed')).toBe('false');
-    expect(backgroundRgb(root.querySelector('.day[aria-label="2026-02-01"]')!)).toEqual([65, 93, 120]);
+    expect(backgroundRgb(root.querySelector('.day[aria-label="2026-02-01"]')!)).toEqual([136, 154, 171]);
     expect(getComputedStyle(root.querySelector('.day[aria-label="2026-02-02"]')!).outlineColor).toBe('rgb(0, 170, 0)');
     fixture.componentInstance.state.logout();
   }));
@@ -473,6 +795,7 @@ describe('Calendar application', () => {
     flushMicrotasks();
     fixture.detectChanges();
     const calendar: CalendarComponent = fixture.debugElement.query(By.directive(CalendarComponent)).componentInstance;
+    spyOnProperty(calendar, 'todayDate', 'get').and.returnValue('2026-01-04');
     calendar.selectedProjectId = 1;
     calendar.forecast = true;
     fixture.detectChanges();
@@ -482,11 +805,11 @@ describe('Calendar application', () => {
     expect(addProject.request.body).toEqual({ fecha: '2026-01-03', proyecto_id: 1, es_prevision: true });
     addProject.flush({}, { status: 201, statusText: 'Created' });
     flushMicrotasks();
-    http.expectOne('/api/calendario/2026').flush({ asignaciones: [assignment], tipados: [] });
+    http.expectOne('/api/calendario/2026').flush({ notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [assignment], tipados: [] });
     flushMicrotasks();
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('.day-panel').textContent).toContain('Trabajo · previsión');
-    expect(backgroundRgb(fixture.nativeElement.querySelector('.day[aria-label="2026-01-03"]'))).toEqual([65, 93, 120]);
+    expect(backgroundRgb(fixture.nativeElement.querySelector('.day[aria-label="2026-01-03"]'))).toEqual([136, 154, 171]);
     expect(calendar.canAddProject(calendar.selectedDay!)).toBeFalse();
     calendar.selectedTypeId = 2;
     fixture.detectChanges();
@@ -495,7 +818,7 @@ describe('Calendar application', () => {
     expect(addType.request.body).toEqual({ fecha: '2026-01-03', tipo_id: 2 });
     addType.flush({}, { status: 201, statusText: 'Created' });
     flushMicrotasks();
-    http.expectOne('/api/calendario/2026').flush({ asignaciones: [assignment], tipados: [typing] });
+    http.expectOne('/api/calendario/2026').flush({ notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [assignment], tipados: [typing] });
     flushMicrotasks();
     fixture.detectChanges();
     expect(calendar.canAddType(calendar.selectedDay!)).toBeFalse();
@@ -505,17 +828,17 @@ describe('Calendar application', () => {
     expect(removeProject.request.method).toBe('DELETE');
     removeProject.flush(null, { status: 204, statusText: 'No Content' });
     flushMicrotasks();
-    http.expectOne('/api/calendario/2026').flush({ asignaciones: [], tipados: [typing] });
+    http.expectOne('/api/calendario/2026').flush({ notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [typing] });
     flushMicrotasks();
     fixture.detectChanges();
     expect(getComputedStyle(fixture.nativeElement.querySelector('.day[aria-label="2026-01-03"]')).backgroundColor)
-      .toBe('rgba(0, 0, 0, 0)');
+      .toBe('rgb(232, 235, 240)');
     fixture.nativeElement.querySelector('[aria-label="Eliminar Especial"]').click();
     const removeType = http.expectOne('/api/tipados/2026-01-03/2');
     expect(removeType.request.method).toBe('DELETE');
     removeType.flush(null, { status: 204, statusText: 'No Content' });
     flushMicrotasks();
-    http.expectOne('/api/calendario/2026').flush({ asignaciones: [], tipados: [] });
+    http.expectOne('/api/calendario/2026').flush({ notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [] });
     flushMicrotasks();
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('.day-panel').textContent).toContain('No hay tipos asignados');
@@ -536,10 +859,12 @@ describe('Calendar application', () => {
     const forecast = { fecha: '2026-01-03', proyecto_id: 1, nombre: 'Trabajo', color: '#123456', laborable: true, es_prevision: true };
     const confirmed = { ...forecast, es_prevision: false };
     void state.loadCalendar(2026);
-    http.expectOne('/api/calendario/2026').flush({ asignaciones: [forecast], tipados: [] });
+    http.expectOne('/api/calendario/2026').flush({ notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [forecast], tipados: [] });
     flushMicrotasks();
     fixture.detectChanges();
     const root: HTMLElement = fixture.nativeElement;
+    const monthTotal = () => root.querySelector('[aria-label="Enero 2026"] h3 span')?.textContent;
+    expect(monthTotal()).toBe('(0)');
     root.querySelector<HTMLButtonElement>('.day[aria-label="2026-01-03"]')!.click();
     http.expectOne('/api/proyectos').flush([project]);
     http.expectOne('/api/tipos-fecha').flush([]);
@@ -555,20 +880,21 @@ describe('Calendar application', () => {
     fixture.detectChanges();
     expect(root.querySelector('.day-panel')?.textContent).toContain('No se pudo confirmar');
     expect(confirmButton()).not.toBeNull();
-    expect(backgroundRgb(root.querySelector('.day[aria-label="2026-01-03"]')!)).toEqual([65, 93, 120]);
+    expect(backgroundRgb(root.querySelector('.day[aria-label="2026-01-03"]')!)).toEqual([136, 154, 171]);
     confirmButton().click();
     const request = http.expectOne('/api/asignaciones/2026-01-03/1/confirmar');
     expect(request.request.method).toBe('POST');
     request.flush({ ...confirmed, usuario_id: 1 });
     flushMicrotasks();
-    http.expectOne('/api/calendario/2026').flush({ asignaciones: [confirmed], tipados: [] });
+    http.expectOne('/api/calendario/2026').flush({ notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [confirmed], tipados: [] });
     flushMicrotasks();
     fixture.detectChanges();
     expect(root.querySelector('[aria-label="Confirmar previsión de Trabajo"]')).toBeNull();
+    expect(monthTotal()).toBe('(1)');
     expect(getComputedStyle(root.querySelector('.day[aria-label="2026-01-03"]')!).backgroundColor).toBe('rgb(18, 52, 86)');
 
     void state.loadCalendar(2026);
-    http.expectOne('/api/calendario/2026').flush({ asignaciones: [confirmed, forecast], tipados: [] });
+    http.expectOne('/api/calendario/2026').flush({ notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [confirmed, forecast], tipados: [] });
     flushMicrotasks();
     fixture.detectChanges();
     root.querySelector<HTMLButtonElement>('.day[aria-label="2026-01-03"]')!.click();
@@ -579,10 +905,11 @@ describe('Calendar application', () => {
     confirmButton().click();
     http.expectOne('/api/asignaciones/2026-01-03/1/confirmar').flush({ ...confirmed, usuario_id: 1 });
     flushMicrotasks();
-    http.expectOne('/api/calendario/2026').flush({ asignaciones: [confirmed], tipados: [] });
+    http.expectOne('/api/calendario/2026').flush({ notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [confirmed], tipados: [] });
     flushMicrotasks();
     fixture.detectChanges();
     expect(root.querySelectorAll('.day-panel-item .item-link').length).toBe(1);
+    expect(monthTotal()).toBe('(1)');
     expect(root.querySelector('[aria-label="Confirmar previsión de Trabajo"]')).toBeNull();
     state.logout();
   }));
@@ -634,7 +961,7 @@ describe('Calendar application', () => {
     http.expectOne('/api/tipos-fecha').flush([]);
     flushMicrotasks();
     void fixture.componentInstance.state.changeYear('2025');
-    http.expectOne('/api/calendario/2025').flush({ asignaciones: [], tipados: [] });
+    http.expectOne('/api/calendario/2025').flush({ notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [] });
     flushMicrotasks();
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('.day-panel')).toBeNull();
@@ -665,7 +992,7 @@ describe('Calendar application', () => {
     const retry = Array.from(panel.querySelectorAll('button') as NodeListOf<HTMLButtonElement>)
       .find(button => button.textContent?.includes('Reintentar actualización'))!;
     retry.click();
-    http.expectOne('/api/calendario/2026').flush({ asignaciones: [], tipados: [] });
+    http.expectOne('/api/calendario/2026').flush({ notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [] });
     flushMicrotasks();
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('.day-panel').textContent).toContain('Calendario actualizado');
@@ -749,11 +1076,15 @@ describe('Calendar application', () => {
     flushMicrotasks();
     http.expectOne('/api/get_years').flush({ years: [2025, 2026, 2027] });
     flushMicrotasks();
-    http.expectOne('/api/calendario/2027').flush({ asignaciones: [], tipados: [] });
+    http.expectOne('/api/calendario/2027').flush({ notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [] });
     flushMicrotasks();
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('.year-title').textContent.trim()).toBe('2027');
-    tick(3600000);
+    tick(35999999);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.textContent).not.toContain('La sesión ha caducado');
+    expect(localStorage.getItem('calendar_token')).toBe('token');
+    tick(1);
     fixture.detectChanges();
     expect(fixture.nativeElement.textContent).toContain('La sesión ha caducado');
     expect(localStorage.getItem('calendar_token')).toBeNull();
@@ -783,7 +1114,7 @@ describe('Calendar application', () => {
     const project = { proyecto_id: 1, nombre: 'Proyecto A', descripcion: '', duracion: null, restantes: null, color: '#4f46e5', laborable: true };
     http.expectOne('/api/proyectos').flush([project]);
     flushMicrotasks();
-    http.expectOne('/api/calendario/2026').flush({ asignaciones: [], tipados: [] });
+    http.expectOne('/api/calendario/2026').flush({ notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [] });
     flushMicrotasks();
     projects.editProject(project);
     projects.projectForm.nombre = 'Proyecto B';
@@ -799,7 +1130,7 @@ describe('Calendar application', () => {
     flushMicrotasks();
     http.expectOne('/api/proyectos').flush([{ ...project, nombre: 'Proyecto B', laborable: false }]);
     flushMicrotasks();
-    http.expectOne('/api/calendario/2026').flush({ asignaciones: [], tipados: [] });
+    http.expectOne('/api/calendario/2026').flush({ notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [] });
     flushMicrotasks();
     fixture.detectChanges();
     expect(fixture.nativeElement.textContent).toContain('Proyecto B');
@@ -866,7 +1197,7 @@ describe('Calendar application', () => {
     const type = { tipo_id: 2, nombre: 'Vacaciones', descripcion: '', color: '#ef4444', en_borde: false };
     http.expectOne('/api/tipos-fecha').flush([type]);
     flushMicrotasks();
-    http.expectOne('/api/calendario/2026').flush({ asignaciones: [], tipados: [] });
+    http.expectOne('/api/calendario/2026').flush({ notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [] });
     flushMicrotasks();
     types.editType(type);
     types.typeForm.en_borde = true;
@@ -878,7 +1209,7 @@ describe('Calendar application', () => {
     flushMicrotasks();
     http.expectOne('/api/tipos-fecha').flush([{ ...type, en_borde: true }]);
     flushMicrotasks();
-    http.expectOne('/api/calendario/2026').flush({ asignaciones: [], tipados: [] });
+    http.expectOne('/api/calendario/2026').flush({ notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [] });
     flushMicrotasks();
     expect(types.dateTypes[0].en_borde).toBeTrue();
     app.state.logout();

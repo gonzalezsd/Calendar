@@ -9,6 +9,14 @@ día en cualquiera de las vistas se abre un panel para consultar, añadir o
 eliminar sus asignaciones de proyectos y tipos de fecha. Desde el panel se puede abrir la edición del
 proyecto o tipo correspondiente. Se admite un tipo con borde y otro sin borde
 por día; para sustituir uno hay que eliminarlo primero.
+Cada día puede tener una nota privada, indicada mediante una etiqueta «Nota»
+en el calendario. Al pasar el ratón o enfocar el día se muestra su texto.
+En el detalle se puede leer y editar; al guardar el texto
+vacío se elimina. Se pide confirmación antes de descartar cambios sin guardar.
+La cabecera de cada mes muestra entre paréntesis el número de fechas con algún
+proyecto laborable confirmado, contando cada fecha una sola vez. Los días
+anteriores a hoy sin asignación de proyecto se muestran sombreados, incluso si
+tienen un tipo de fecha; la comparación usa la fecha local.
 El fondo de un día utiliza el color de su proyecto o `#2C813A` si tiene varios
 proyectos distintos; las asignaciones ordinarias y de previsión del mismo
 proyecto cuentan como uno solo. Si el proyecto no tiene color se usa gris. Los
@@ -17,6 +25,11 @@ calendario; los detalles siguen disponibles en el panel.
 Los días con solo previsiones usan un fondo más claro; si hay alguna asignación
 confirmada se usa el color normal. Las previsiones se pueden confirmar desde el
 detalle del día; si ya existe la asignación confirmada, ambas se unifican.
+Las cadenas de sábados, domingos y festivos contiguas a `Vacaciones` usan su
+color, incluso entre meses o años; si hay vacaciones confirmadas y en
+previsión junto a la misma cadena, se usa el color confirmado. Se conservan
+los colores de los días que ya tienen proyectos asignados. El sombreado no
+crea asignaciones ni modifica los totales.
 Al pulsar varios días con Mayús se seleccionan sin abrir el panel. Una pulsación
 sin Mayús sustituye la selección y abre el detalle. Al cerrar el panel se
 deselecciona el día consultado; al cambiar de año se limpia toda la selección.
@@ -25,8 +38,13 @@ proyectos, tipos y si los proyectos son previsiones. La operación se cancela
 completamente si alguna asignación ya existe o entra en conflicto.
 En la vista anual, «Información anual» muestra los días laborables (todos los
 días salvo los que tengan el tipo `Festivo` o el proyecto `Vacaciones`), los
-días trabajados y los totales por tipo y proyecto. Las previsiones se incluyen;
-cada día se cuenta una sola vez por proyecto, aunque también tenga asignación real.
+días trabajados y los totales por tipo y proyecto. Los días trabajados generales
+cuentan fechas con algún proyecto laborable confirmado; por proyecto se cuentan
+sus fechas confirmadas. Los días asignados incluyen previsiones y cada fecha se
+cuenta una sola vez por proyecto, aunque también tenga asignación confirmada.
+En la vista mensual, «Información mensual» muestra los mismos recuentos limitados
+al mes consultado. La duración inicial y los días restantes son valores globales
+del proyecto, no del mes.
 
 El código de `src/app` está organizado en componentes independientes para acceso,
 calendario, usuarios, proyectos y tipos de fecha. `core` contiene los modelos y
@@ -49,7 +67,7 @@ el estado compartido de la sesión y el calendario.
    dirección. No es necesario habilitar CORS cuando se usa este proxy.
 
 La sesión se conserva en el almacenamiento local del navegador hasta que el
-token caduque (una hora), se invalide o se cierre sesión. La contraseña no se
+token caduque (diez horas), se invalide o se cierre sesión. La contraseña no se
 almacena. El token es accesible para JavaScript del mismo origen: utiliza HTTPS,
 protección frente a XSS y solo dispositivos de confianza en producción.
 

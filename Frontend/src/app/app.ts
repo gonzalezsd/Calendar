@@ -26,6 +26,7 @@ export class App implements OnInit {
   }
 
   navigate(view: View): void {
+    if (view !== 'calendar' && this.calendar && !this.calendar.canLeaveDay()) return;
     this.state.menuOpen = false;
     if (view === 'calendar') this.calendar?.showYear();
     if (this.state.view === view) {
@@ -37,5 +38,20 @@ export class App implements OnInit {
       }
     }
     this.state.view = view;
+  }
+
+  logout(): void {
+    if (this.calendar && !this.calendar.canLeaveDay()) return;
+    this.state.logout();
+  }
+
+  changeYear(event: Event): void {
+    const select = event.target;
+    if (!(select instanceof HTMLSelectElement)) return;
+    if (this.calendar && !this.calendar.canLeaveDay()) {
+      select.value = String(this.state.year ?? '');
+      return;
+    }
+    void this.state.changeYear(select.value);
   }
 }

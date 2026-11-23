@@ -1,7 +1,7 @@
 import { Injectable } from '@angular/core';
 import { HttpClient, HttpErrorResponse, HttpHeaders } from '@angular/common/http';
 import { firstValueFrom } from 'rxjs';
-import { CalendarData, CurrentUser, Day, Month, Session, View } from './models';
+import { CalendarData, CurrentUser, Day, Month, Session, VacationContext, View } from './models';
 
 @Injectable({ providedIn: 'root' })
 export class AppState {
@@ -24,6 +24,7 @@ export class AppState {
   years: number[] = [];
   year: number | null = null;
   calendar: Month[] = [];
+  vacationContext: VacationContext = { anterior: [], posterior: [] };
 
   constructor(private readonly http: HttpClient) {}
 
@@ -73,6 +74,7 @@ export class AppState {
     this.years = [];
     this.year = null;
     this.calendar = [];
+    this.vacationContext = { anterior: [], posterior: [] };
     this.calendarLoading = false;
     this.view = 'calendar';
     this.editTarget = null;
@@ -146,10 +148,14 @@ export class AppState {
   async loadCalendar(year: number): Promise<void> {
     const sequence = ++this.calendarRequest;
     this.calendar = [];
+    this.vacationContext = { anterior: [], posterior: [] };
     this.calendarLoading = true;
     try {
       const data = await this.request<CalendarData>('GET', `/api/calendario/${year}`);
-      if (sequence === this.calendarRequest) this.calendar = this.buildCalendar(year, data);
+      if (sequence === this.calendarRequest) {
+        this.calendar = this.buildCalendar(year, data);
+        this.vacationContext = data.contexto_vacaciones;
+      }
     } catch (error) {
       if (sequence === this.calendarRequest) throw error;
     } finally {
@@ -170,7 +176,8 @@ export class AppState {
         days.push({
           number: day, date: key,
           assignments: data.asignaciones.filter(item => item.fecha === key),
-          typings: data.tipados.filter(item => item.fecha === key)
+          typings: data.tipados.filter(item => item.fecha === key),
+          note: data.notas.find(item => item.fecha === key)?.texto ?? null
         });
       }
       return { name, days };
