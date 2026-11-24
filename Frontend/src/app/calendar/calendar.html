@@ -39,15 +39,25 @@
             @for (day of month.days; track $index) {
               @if (day) {
                 <button type="button" class="day" [attr.aria-label]="day.date" [style.outline]="getTypingBorderStyle(day)"
-                     [attr.aria-describedby]="day.note !== null ? 'note-indicator-' + day.date + ' note-preview-' + day.date : null"
+                     [attr.aria-describedby]="(day.note !== null ? 'note-indicator-' + day.date + ' ' : '') + (day.reminders.length ? 'reminder-indicator-' + day.date + ' ' : '') + (day.note !== null || hasDailyReminder(day) ? 'note-preview-' + day.date : '') || null"
                      [attr.aria-pressed]="selectedDates.has(day.date)" [disabled]="state.loading" (click)="selectDay(day, $event)"
                      [class.past-unassigned]="day.date < today && !day.assignments.length"
                      [style.background-color]="getProjectBackground(day) || vacationColors.get(day.date) || null"
                      [style.outline-offset]="getTypingBorderStyle(day) ? '-2px' : null">
                   <span class="day-number" [style.color]="getTypingNumberColor(day)">{{ day.number }}</span>
-                  @if (day.note !== null) {
-                    <span class="note-indicator" [id]="'note-indicator-' + day.date">Nota</span>
-                    <span class="note-preview" [id]="'note-preview-' + day.date" role="tooltip">{{ day.note }}</span>
+                  @if (day.note !== null || day.reminders.length) {
+                    <span class="day-markers">
+                      @if (day.note !== null) { <span class="note-indicator" [id]="'note-indicator-' + day.date">Nota</span> }
+                      @if (day.reminders.length) { <span class="reminder-indicator" [id]="'reminder-indicator-' + day.date">Recordatorio</span> }
+                    </span>
+                  }
+                  @if (day.note !== null || hasDailyReminder(day)) {
+                    <span class="note-preview" [id]="'note-preview-' + day.date" role="tooltip">
+                      @if (day.note !== null) { <span class="preview-item">{{ day.note }}</span> }
+                      @for (reminder of day.reminders; track reminder.recordatorio_id) {
+                        @if (reminder.hora === null) { <span class="preview-item">{{ reminder.texto }}</span> }
+                      }
+                    </span>
                   }
                   @if (selectedDates.has(day.date)) { <span class="selection-mark" aria-hidden="true">✓</span> }
                 </button>
@@ -81,23 +91,23 @@
           </label>
           <p class="muted">Se aplica a todos los proyectos seleccionados.</p>
         </div>
-        @for (project of projects; track project.proyecto_id) {
+        @for (project of activeProjects; track project.proyecto_id) {
           <label class="check bulk-option">
             <input name="bulkProject" type="checkbox" [checked]="bulkProjectIds.has(project.proyecto_id)" [disabled]="state.loading"
                    (change)="toggleBulkSelection(bulkProjectIds, project.proyecto_id)">
             {{ project.nombre || 'Sin nombre' }}
           </label>
-        } @empty { <p class="muted">No hay proyectos.</p> }
+        } @empty { <p class="muted">No hay proyectos activos.</p> }
       </section>
       <section aria-labelledby="bulk-types-title">
         <h3 id="bulk-types-title">Tipos de fecha</h3>
-        @for (type of dateTypes; track type.tipo_id) {
+        @for (type of activeDateTypes; track type.tipo_id) {
           <label class="check bulk-option">
             <input type="checkbox" [checked]="bulkTypeIds.has(type.tipo_id)" [disabled]="state.loading || type.en_borde === null"
                    (change)="toggleBulkSelection(bulkTypeIds, type.tipo_id)">
             {{ type.nombre || 'Sin nombre' }}{{ type.en_borde ? ' · borde' : '' }}{{ type.en_borde === null ? ' · modalidad no definida' : '' }}
           </label>
-        } @empty { <p class="muted">No hay tipos de fecha.</p> }
+        } @empty { <p class="muted">No hay tipos de fecha activos.</p> }
       </section>
       <button type="button" class="primary" [disabled]="state.loading || (!bulkProjectIds.size && !bulkTypeIds.size)"
               (click)="assignSelectedDays()">Asignar</button>
@@ -132,7 +142,7 @@
         <h3 id="annual-types-title">Tipos de fecha</h3>
         @for (type of summary.types; track type.tipo_id) {
           <div class="day-panel-item"><span>{{ type.nombre || 'Sin nombre' }}</span><strong>{{ type.days }} {{ type.days === 1 ? 'día' : 'días' }}</strong></div>
-        } @empty { <p class="muted">No hay tipos de fecha.</p> }
+        } @empty { <p class="muted">No hay tipos de fecha asignados en este periodo.</p> }
       </section>
       <section aria-labelledby="annual-projects-title">
         <h3 id="annual-projects-title">Proyectos</h3>
@@ -144,7 +154,7 @@
             <p>Días asignados: {{ project.days }}</p>
             <p>Días trabajados: {{ project.workedDays }}</p>
           </div>
-        } @empty { <p class="muted">No hay proyectos.</p> }
+        } @empty { <p class="muted">No hay proyectos asignados en este periodo.</p> }
       </section>
     }
   </aside>
@@ -160,13 +170,6 @@
     @if (refreshFailed) {
       <button type="button" class="secondary" [disabled]="state.loading" (click)="retryRefresh(day)">Reintentar actualización del calendario</button>
     }
-    <section aria-labelledby="day-note-title">
-      <h3 id="day-note-title">Nota</h3>
-      <label for="day-note">Texto de la nota</label>
-      <textarea id="day-note" rows="4" [(ngModel)]="noteDraft" [disabled]="state.loading"></textarea>
-      <button type="button" class="primary" (click)="saveNote(day)"
-              [disabled]="state.loading || !noteDirty || (day.note === null && !noteDraft.trim())">Guardar nota</button>
-    </section>
     <section aria-labelledby="day-projects-title">
       <h3 id="day-projects-title">Proyectos</h3>
       @if (!day.assignments.length) { <p class="muted">No hay proyectos asignados.</p> }
@@ -192,7 +195,7 @@
           <label>Proyecto
             <select [(ngModel)]="selectedProjectId">
               <option [ngValue]="null">Selecciona un proyecto</option>
-              @for (project of projects; track project.proyecto_id) {
+              @for (project of activeProjects; track project.proyecto_id) {
                 <option [ngValue]="project.proyecto_id">{{ project.nombre || 'Sin nombre' }}</option>
               }
             </select>
@@ -221,7 +224,7 @@
           <label>Tipo de fecha
             <select [(ngModel)]="selectedTypeId">
               <option [ngValue]="null">Selecciona un tipo</option>
-              @for (type of dateTypes; track type.tipo_id) {
+              @for (type of activeDateTypes; track type.tipo_id) {
                 <option [ngValue]="type.tipo_id">{{ type.nombre || 'Sin nombre' }}{{ type.en_borde ? ' · borde' : '' }}</option>
               }
             </select>
@@ -238,5 +241,32 @@
       @if (state.loading) { <p class="muted" role="status">Cargando opciones…</p> }
       @else { <button type="button" class="secondary" (click)="loadCatalogs()">Reintentar carga de opciones</button> }
     }
+    <section aria-labelledby="day-reminders-title">
+      <h3 id="day-reminders-title">Recordatorios</h3>
+      @for (reminder of day.reminders; track reminder.recordatorio_id) {
+        <div class="day-panel-item reminder-item">
+          <strong>{{ reminder.hora ?? 'Todo el día' }}{{ reminder.repetir ? ' · Repetir cada año' : '' }}</strong>
+          <span>{{ reminder.texto }}</span>
+        </div>
+      } @empty { <p class="muted">No hay recordatorios.</p> }
+      <div class="day-panel-form">
+        <label>Texto del recordatorio
+          <textarea rows="3" [(ngModel)]="reminderText" [disabled]="state.loading"></textarea>
+        </label>
+        <label>Hora (opcional)
+          <input type="time" [(ngModel)]="reminderTime" [disabled]="state.loading">
+        </label>
+        <label class="check"><input type="checkbox" [(ngModel)]="reminderRepeat" [disabled]="state.loading"> Repetir cada año</label>
+        <button type="button" class="primary" [disabled]="state.loading || !reminderText.trim()"
+                (click)="addReminder(day)">Añadir recordatorio</button>
+      </div>
+    </section>
+    <section aria-labelledby="day-note-title">
+      <h3 id="day-note-title">Nota</h3>
+      <label for="day-note">Texto de la nota</label>
+      <textarea id="day-note" rows="4" [(ngModel)]="noteDraft" [disabled]="state.loading"></textarea>
+      <button type="button" class="primary" (click)="saveNote(day)"
+              [disabled]="state.loading || !noteDirty || (day.note === null && !noteDraft.trim())">Guardar nota</button>
+    </section>
   </aside>
 }

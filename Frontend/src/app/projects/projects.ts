@@ -37,15 +37,15 @@ export class ProjectsComponent implements OnInit {
   }
 
   private emptyProject(): EditableProject {
-    return { nombre: '', descripcion: '', duracion: null, restantes: null, color: '#4f46e5', laborable: true };
+    return { nombre: '', descripcion: '', duracion: null, restantes: null, color: '#4f46e5', laborable: true, activo: false };
   }
 
   async saveProject(form: NgForm): Promise<void> {
     if (form.invalid) return;
     await this.state.run(async () => {
-      const { nombre, descripcion, duracion, restantes, color, laborable } = this.projectForm;
+      const { nombre, descripcion, duracion, restantes, color, laborable, activo } = this.projectForm;
       const url = this.editingId === null ? '/api/proyectos' : `/api/proyectos/${this.editingId}`;
-      await this.state.request(this.editingId === null ? 'POST' : 'PATCH', url, { nombre, descripcion, duracion, restantes, color, laborable });
+      await this.state.request(this.editingId === null ? 'POST' : 'PATCH', url, { nombre, descripcion, duracion, restantes, color, laborable, activo });
       this.resetForm();
       this.projects = await this.state.request<Project[]>('GET', '/api/proyectos');
       if (this.state.year !== null) await this.state.loadCalendar(this.state.year);

@@ -3,7 +3,7 @@
   <section class="panel"><h3>Proyectos existentes</h3>
     @if (!projects.length && !state.loading) { <p class="muted">No hay proyectos.</p> }
     @for (item of projects; track item.proyecto_id) {
-      <div class="list-item"><div><strong><span class="color-dot" [style.background]="item.color || '#9ca3af'"></span>{{ item.nombre || 'Sin nombre' }}</strong><small>{{ item.descripcion || 'Sin descripción' }}</small></div><button type="button" class="secondary" (click)="editProject(item)">Editar</button></div>
+      <div class="list-item"><div><strong><span class="color-dot" [style.background]="item.color || '#9ca3af'"></span>{{ item.nombre || 'Sin nombre' }}</strong><small>{{ item.descripcion || 'Sin descripción' }} · {{ item.activo ? 'Activo' : 'Inactivo' }}</small></div><button type="button" class="secondary" (click)="editProject(item)">Editar</button></div>
     }
   </section>
   <section class="panel"><h3>{{ editingId === null ? 'Nuevo proyecto' : 'Editar proyecto' }}</h3>
@@ -15,6 +15,7 @@
         <label>Restantes <input name="restantes" type="number" min="-32768" max="880" step="1" [(ngModel)]="projectForm.restantes"></label>
       </div>
       <label class="check"><input name="laborable" type="checkbox" [(ngModel)]="projectForm.laborable"> Laborable</label>
+      <label class="check"><input name="activo" type="checkbox" [(ngModel)]="projectForm.activo"> Activo</label>
       <label>Color <input name="color" type="color" [(ngModel)]="projectForm.color"></label>
       <div class="form-actions"><button class="primary" type="submit" [disabled]="state.loading || projectFormRef.invalid">Guardar</button>
         @if (editingId !== null) { <button type="button" class="secondary" (click)="resetForm()">Cancelar</button> }

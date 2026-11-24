@@ -38,6 +38,8 @@
               }
               <button type="button" (click)="navigate('tipos')">Tipos de fecha</button>
               <button type="button" (click)="navigate('proyectos')">Proyectos</button>
+              <button type="button" (click)="navigate('recordatorios')">Recordatorios anuales</button>
+              <button type="button" (click)="navigate('importar-exportar')">Importar/exportar calendario</button>
             </div>
           }
         </div>
@@ -45,7 +47,7 @@
       <label class="year-selector">Año
         <select [value]="state.year ?? ''" (change)="changeYear($event)" [disabled]="!state.years.length">
           @if (!state.years.length) { <option value="">Sin años</option> }
-          @for (option of state.years; track option) { <option [value]="option">{{ option }}</option> }
+          @for (option of state.years; track option) { <option [value]="option" [selected]="option === state.year">{{ option }}</option> }
         </select>
       </label>
     </nav>
@@ -59,6 +61,20 @@
       @case ('usuarios') { <app-users /> }
       @case ('proyectos') { <app-projects /> }
       @case ('tipos') { <app-date-types /> }
+      @case ('recordatorios') { <app-recurring-reminders /> }
+      @case ('importar-exportar') { <app-calendar-transfer /> }
     }
   </main>
+  @if (state.loginReminders.length) {
+    <dialog #remindersDialog class="reminders-dialog" aria-labelledby="reminders-dialog-title"
+            (close)="state.loginReminders = []" (cancel)="state.loginReminders = []">
+      <h2 id="reminders-dialog-title">Recordatorios de hoy</h2>
+      <ul>
+        @for (reminder of state.loginReminders; track reminder.recordatorio_id) {
+          <li><strong>{{ reminder.hora ?? 'Todo el día' }}</strong><span>{{ reminder.texto }}</span></li>
+        }
+      </ul>
+      <button type="button" class="primary" (click)="remindersDialog.close(); state.loginReminders = []">Cerrar</button>
+    </dialog>
+  }
 }

@@ -9,6 +9,9 @@ día en cualquiera de las vistas se abre un panel para consultar, añadir o
 eliminar sus asignaciones de proyectos y tipos de fecha. Desde el panel se puede abrir la edición del
 proyecto o tipo correspondiente. Se admite un tipo con borde y otro sin borde
 por día; para sustituir uno hay que eliminarlo primero.
+Los proyectos y tipos se crean inactivos y se pueden activar desde Configuración;
+solo los activos aparecen como opciones para nuevas asignaciones individuales o
+múltiples. Las asignaciones existentes siguen visibles al desactivarlos.
 Cada día puede tener una nota privada, indicada mediante una etiqueta «Nota»
 en el calendario. Al pasar el ratón o enfocar el día se muestra su texto.
 En el detalle se puede leer y editar; al guardar el texto
@@ -36,15 +39,29 @@ deselecciona el día consultado; al cambiar de año se limpia toda la selección
 En la vista anual, al seleccionar varios días aparece «Asignar» para elegir
 proyectos, tipos y si los proyectos son previsiones. La operación se cancela
 completamente si alguna asignación ya existe o entra en conflicto.
-En la vista anual, «Información anual» muestra los días laborables (todos los
-días salvo los que tengan el tipo `Festivo` o el proyecto `Vacaciones`), los
-días trabajados y los totales por tipo y proyecto. Los días trabajados generales
+En la vista anual, «Información anual» muestra los días laborables (fechas con
+algún proyecto laborable asignado, incluidas las previsiones, contadas una sola
+vez), los días trabajados y los totales por tipo y proyecto. Los días trabajados generales
 cuentan fechas con algún proyecto laborable confirmado; por proyecto se cuentan
 sus fechas confirmadas. Los días asignados incluyen previsiones y cada fecha se
 cuenta una sola vez por proyecto, aunque también tenga asignación confirmada.
 En la vista mensual, «Información mensual» muestra los mismos recuentos limitados
-al mes consultado. La duración inicial y los días restantes son valores globales
+al mes consultado. Los desgloses solo incluyen proyectos y tipos asignados al
+periodo, aunque estén inactivos. La duración inicial y los días restantes son valores globales
 del proyecto, no del mes.
+En el detalle de cada día se pueden consultar y crear recordatorios privados,
+con hora opcional y repetición anual. Los días con recordatorios muestran una
+etiqueta; al pasar el ratón se leen los recordatorios sin hora. Al iniciar sesión
+aparece un diálogo con todos los recordatorios de ese día. Crear un año copia
+los recordatorios repetidos sin duplicados; los del 29 de febrero pasan al 28
+en años no bisiestos.
+En Configuración, «Recordatorios anuales» permite editar el día, mes, hora, texto
+y repetición de cada serie. Los cambios afectan a todas sus ocurrencias; al
+desactivar la repetición se conservan las existentes, pero no se crean nuevas.
+En Configuración, «Importar/exportar calendario» descarga el año elegido o
+todos los años como un CSV, o importa un archivo al calendario del usuario actual.
+El archivo determina los años de destino. La importación combina los datos y se cancela por completo
+ante cualquier conflicto; consulta el contrato CSV en el README del backend.
 
 El código de `src/app` está organizado en componentes independientes para acceso,
 calendario, usuarios, proyectos y tipos de fecha. `core` contiene los modelos y
@@ -65,6 +82,9 @@ el estado compartido de la sesión y el calendario.
 3. Abre `http://localhost:4200`. El proxy de desarrollo envía `/api` a
    `http://127.0.0.1:5000`; modifica `proxy.conf.json` si Flask usa otra
    dirección. No es necesario habilitar CORS cuando se usa este proxy.
+
+Al iniciar sesión se selecciona el año actual si está disponible; en caso
+contrario, se muestra el año disponible más reciente.
 
 La sesión se conserva en el almacenamiento local del navegador hasta que el
 token caduque (diez horas), se invalide o se cierre sesión. La contraseña no se

@@ -1,13 +1,16 @@
+import csv
+import io
 import json
 import re
-from datetime import date, timedelta
+import sys
+from datetime import date, time, timedelta
 from functools import wraps
 from getpass import getpass
 from pathlib import Path
 
 import click
 import psycopg
-from flask import Flask, current_app, g, jsonify, request
+from flask import Flask, Response, current_app, g, jsonify, request
 from flask_cors import CORS
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from psycopg import errors, sql
@@ -24,6 +27,8 @@ class APIError(Exception):
 
 CONFIG_PATH = Path(__file__).resolve().with_name("config.json")
 TOKEN_MAX_AGE_SECONDS = 10 * 60 * 60
+# Las notas y los recordatorios no tienen un límite de tamaño en la base de datos.
+csv.field_size_limit(sys.maxsize)
 
 
 def load_config(path):
@@ -290,16 +295,20 @@ def create_app(test_config=None):
         db = get_db()
         with db.transaction():
             existing_types = db.execute(
-                "SELECT tipo_id FROM tipos_fecha WHERE tipo_id = ANY(%s) ORDER BY tipo_id FOR SHARE", (types,)
+                "SELECT tipo_id, activo FROM tipos_fecha WHERE tipo_id = ANY(%s) ORDER BY tipo_id FOR SHARE", (types,)
             ).fetchall()
             if len(existing_types) != len(types):
                 raise APIError("Tipo de fecha no encontrado", 404)
+            if any(not kind["activo"] for kind in existing_types):
+                raise APIError("Solo se pueden asignar tipos de fecha activos", 409)
             existing_projects = db.execute(
-                "SELECT proyecto_id FROM proyectos WHERE proyecto_id = ANY(%s) ORDER BY proyecto_id FOR UPDATE",
+                "SELECT proyecto_id, activo FROM proyectos WHERE proyecto_id = ANY(%s) ORDER BY proyecto_id FOR UPDATE",
                 (projects,),
             ).fetchall()
             if len(existing_projects) != len(projects):
                 raise APIError("Proyecto no encontrado", 404)
+            if any(not project["activo"] for project in existing_projects):
+                raise APIError("Solo se pueden asignar proyectos activos", 409)
             db.execute("SELECT usuario_id FROM usuarios WHERE usuario_id = %s FOR UPDATE", (g.user["usuario_id"],))
             for day in sorted(days):
                 for project_id in sorted(projects):
@@ -331,7 +340,7 @@ def create_app(test_config=None):
             raise APIError("es_prevision debe ser booleano", 400)
         db = get_db()
         with db.transaction():
-            lock_project(db, project_id)
+            lock_project(db, project_id, require_active=True)
             result = db.execute(
                 """INSERT INTO asignaciones (usuario_id, fecha, proyecto_id, es_prevision)
                    VALUES (%s, %s, %s, %s) RETURNING usuario_id, fecha, proyecto_id, es_prevision""",
@@ -433,6 +442,152 @@ def create_app(test_config=None):
                 raise APIError("Nota no encontrada", 404)
         return "", 204
 
+    @app.post("/api/recordatorios")
+    @authenticated()
+    def create_reminder():
+        data = body({"fecha", "hora", "texto", "repetir"}, {"fecha", "texto", "repetir"})
+        day = valid_date(data["fecha"])
+        text = valid_reminder_text(data["texto"])
+        if type(data["repetir"]) is not bool:
+            raise APIError("repetir debe ser booleano", 400)
+        hour = valid_reminder_time(data.get("hora"))
+        db = get_db()
+        with db.transaction():
+            db.execute("SELECT usuario_id FROM usuarios WHERE usuario_id = %s FOR UPDATE", (g.user["usuario_id"],))
+            row = db.execute(
+                """INSERT INTO recordatorios (usuario_id, fecha, hora, texto, repetir, fecha_original)
+                   VALUES (%s, %s, %s, %s, %s, %s)
+                   RETURNING recordatorio_id, fecha, hora, texto, repetir""",
+                (g.user["usuario_id"], day, hour, text, data["repetir"], day),
+            ).fetchone()
+        return jsonify(serialize_reminder(row)), 201
+
+    @app.get("/api/recordatorios/recurrentes")
+    @authenticated()
+    def list_recurring_reminders():
+        rows = get_db().execute(
+            """SELECT DISTINCT ON (EXTRACT(MONTH FROM fecha_original), EXTRACT(DAY FROM fecha_original), hora, texto)
+                      recordatorio_id, EXTRACT(MONTH FROM fecha_original)::integer AS mes,
+                      EXTRACT(DAY FROM fecha_original)::integer AS dia, hora, texto, repetir
+               FROM recordatorios WHERE usuario_id = %s AND repetir = true
+               ORDER BY EXTRACT(MONTH FROM fecha_original), EXTRACT(DAY FROM fecha_original),
+                        hora NULLS FIRST, texto, recordatorio_id""",
+            (g.user["usuario_id"],),
+        ).fetchall()
+        for row in rows:
+            row["hora"] = row["hora"].strftime("%H:%M") if row["hora"] is not None else None
+        return jsonify(rows)
+
+    @app.patch("/api/recordatorios/<int:reminder_id>")
+    @authenticated()
+    def update_recurring_reminder(reminder_id):
+        positive_id(reminder_id)
+        data = body({"mes", "dia", "hora", "texto", "repetir"}, {"mes", "dia", "hora", "texto", "repetir"})
+        if (type(data["mes"]) is not int or not 1 <= data["mes"] <= 12 or
+                type(data["dia"]) is not int or not 1 <= data["dia"] <= 31):
+            raise APIError("mes y dia deben ser enteros válidos", 400)
+        try:
+            new_original = date(2000, data["mes"], data["dia"])
+        except ValueError:
+            raise APIError("El día y el mes no corresponden a una fecha válida", 400)
+        hour = valid_reminder_time(data["hora"])
+        text = valid_reminder_text(data["texto"])
+        if type(data["repetir"]) is not bool:
+            raise APIError("repetir debe ser booleano", 400)
+        db = get_db()
+        with db.transaction():
+            db.execute("SELECT usuario_id FROM usuarios WHERE usuario_id = %s FOR UPDATE", (g.user["usuario_id"],))
+            original = db.execute(
+                """SELECT fecha_original, hora, texto FROM recordatorios
+                   WHERE usuario_id = %s AND recordatorio_id = %s AND repetir = true""",
+                (g.user["usuario_id"], reminder_id),
+            ).fetchone()
+            if not original:
+                raise APIError("Recordatorio recurrente no encontrado", 404)
+            if not (new_original.month == 2 and new_original.day == 29 and
+                    reminder_date(original["fecha_original"].year, new_original).day == 28):
+                new_original = new_original.replace(year=original["fecha_original"].year)
+            rows = db.execute(
+                """SELECT recordatorio_id, fecha FROM recordatorios
+                   WHERE usuario_id = %s AND repetir = true
+                   AND EXTRACT(MONTH FROM fecha_original) = %s AND EXTRACT(DAY FROM fecha_original) = %s
+                   AND hora IS NOT DISTINCT FROM %s AND texto = %s""",
+                (g.user["usuario_id"], original["fecha_original"].month, original["fecha_original"].day,
+                 original["hora"], original["texto"]),
+            ).fetchall()
+            ids = [row["recordatorio_id"] for row in rows]
+            if data["repetir"] and db.execute(
+                """SELECT 1 FROM recordatorios WHERE usuario_id = %s AND repetir = true
+                   AND EXTRACT(MONTH FROM fecha_original) = %s AND EXTRACT(DAY FROM fecha_original) = %s
+                   AND hora IS NOT DISTINCT FROM %s AND texto = %s AND NOT (recordatorio_id = ANY(%s))
+                   LIMIT 1""",
+                (g.user["usuario_id"], new_original.month, new_original.day, hour, text, ids),
+            ).fetchone():
+                raise APIError("Ya existe un recordatorio recurrente con esa fecha, hora y texto", 409)
+            for row in rows:
+                db.execute(
+                    """UPDATE recordatorios SET fecha = %s, fecha_original = %s, hora = %s, texto = %s, repetir = %s
+                       WHERE usuario_id = %s AND recordatorio_id = %s""",
+                    (reminder_date(row["fecha"].year, new_original), new_original, hour, text, data["repetir"],
+                     g.user["usuario_id"], row["recordatorio_id"]),
+                )
+        return jsonify(recordatorio_id=reminder_id, mes=new_original.month, dia=new_original.day,
+                       hora=hour.strftime("%H:%M") if hour is not None else None, texto=text, repetir=data["repetir"])
+
+    @app.get("/api/recordatorios/<day>")
+    @authenticated()
+    def get_reminders(day):
+        day = valid_date(day)
+        rows = get_db().execute(
+            """SELECT recordatorio_id, fecha, hora, texto, repetir FROM recordatorios
+               WHERE usuario_id = %s AND fecha = %s ORDER BY hora NULLS FIRST, recordatorio_id""",
+            (g.user["usuario_id"], day),
+        ).fetchall()
+        return jsonify([serialize_reminder(row) for row in rows])
+
+    @app.get("/api/calendario/<int:year>/exportar")
+    @authenticated()
+    def export_calendar(year):
+        if not 1 <= year <= 9999:
+            raise APIError("year debe ser un entero entre 1 y 9999", 400)
+        db = get_db()
+        with db.transaction():
+            db.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            data = export_calendar_csv(db, g.user["usuario_id"], year)
+        return Response(data, mimetype="text/csv", headers={
+            "Content-Disposition": f'attachment; filename="calendario-{year}.csv"',
+            "Cache-Control": "no-store",
+        })
+
+    @app.get("/api/calendario/exportar")
+    @authenticated()
+    def export_all_calendars():
+        db = get_db()
+        with db.transaction():
+            db.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            data = export_calendar_csv(db, g.user["usuario_id"], None)
+        return Response(data, mimetype="text/csv", headers={
+            "Content-Disposition": 'attachment; filename="calendario-completo.csv"',
+            "Cache-Control": "no-store",
+        })
+
+    @app.post("/api/calendario/importar")
+    @authenticated()
+    def import_calendar():
+        content = request.get_data()
+        year, records = parse_calendar_csv(content)
+        db = get_db()
+        with db.transaction():
+            result = import_calendar_csv(db, g.user["usuario_id"], year, records)
+            if year is None:
+                result["years"] = sorted({
+                    valid_date(row["fecha"]).year for row in records
+                    if row["tipo"] in ("asignacion", "tipado", "nota", "recordatorio")
+                })
+            else:
+                result["year"] = year
+        return jsonify(result), 201
+
     @app.get("/api/get_years")
     @authenticated()
     def get_years():
@@ -442,8 +597,10 @@ def create_app(test_config=None):
                SELECT EXTRACT(YEAR FROM fecha)::integer AS year FROM tipados WHERE usuario_id = %s
                UNION
                SELECT EXTRACT(YEAR FROM fecha)::integer AS year FROM notas WHERE usuario_id = %s
+               UNION
+               SELECT EXTRACT(YEAR FROM fecha)::integer AS year FROM recordatorios WHERE usuario_id = %s
                ORDER BY year""",
-            (g.user["usuario_id"], g.user["usuario_id"], g.user["usuario_id"]),
+            (g.user["usuario_id"], g.user["usuario_id"], g.user["usuario_id"], g.user["usuario_id"]),
         ).fetchall()
         return jsonify(years=[row["year"] for row in rows])
 
@@ -472,8 +629,15 @@ def create_app(test_config=None):
                WHERE usuario_id = %s AND EXTRACT(YEAR FROM fecha) = %s ORDER BY fecha""",
             (g.user["usuario_id"], year),
         ).fetchall()
+        reminders = db.execute(
+            """SELECT recordatorio_id, fecha, hora, texto, repetir FROM recordatorios
+               WHERE usuario_id = %s AND EXTRACT(YEAR FROM fecha) = %s
+               ORDER BY fecha, hora NULLS FIRST, recordatorio_id""",
+            (g.user["usuario_id"], year),
+        ).fetchall()
         for row in assignments + typings + notes:
             row["fecha"] = row["fecha"].isoformat()
+        reminders = [serialize_reminder(row) for row in reminders]
         context = {"anterior": [], "posterior": []}
         for key, boundary, step in (
             ("anterior", date(year, 1, 1), -1),
@@ -500,7 +664,8 @@ def create_app(test_config=None):
                 (boundary + timedelta(days=step), step, date.min if step < 0 else date.max,
                  g.user["usuario_id"], g.user["usuario_id"]),
             ).fetchall()
-        return jsonify(asignaciones=assignments, tipados=typings, notas=notes, contexto_vacaciones=context)
+        return jsonify(asignaciones=assignments, tipados=typings, notas=notes, recordatorios=reminders,
+                       contexto_vacaciones=context)
 
     @app.post("/api/new_year")
     @authenticated()
@@ -534,6 +699,31 @@ def create_app(test_config=None):
                    SELECT %s, fecha, %s FROM unnest(%s::date[]) AS fecha""",
                 (g.user["usuario_id"], kinds[0]["tipo_id"], days),
             )
+            reminders = db.execute(
+                """SELECT fecha_original, hora, texto FROM recordatorios
+                   WHERE usuario_id = %s AND repetir = true ORDER BY fecha_original, recordatorio_id""",
+                (g.user["usuario_id"],),
+            ).fetchall()
+            existing = {
+                (row["fecha"], row["hora"], row["texto"])
+                for row in db.execute(
+                    """SELECT fecha, hora, texto FROM recordatorios
+                       WHERE usuario_id = %s AND EXTRACT(YEAR FROM fecha) = %s""",
+                    (g.user["usuario_id"], year),
+                ).fetchall()
+            }
+            for reminder in reminders:
+                original = reminder["fecha_original"]
+                target = reminder_date(year, original)
+                key = (target, reminder["hora"], reminder["texto"])
+                if key in existing:
+                    continue
+                db.execute(
+                    """INSERT INTO recordatorios (usuario_id, fecha, hora, texto, repetir, fecha_original)
+                       VALUES (%s, %s, %s, %s, true, %s)""",
+                    (g.user["usuario_id"], target, reminder["hora"], reminder["texto"], original),
+                )
+                existing.add(key)
             result = {"usuario_id": g.user["usuario_id"], "fecha": first.isoformat(), "tipo_id": kinds[0]["tipo_id"]}
         return jsonify(result), 201
 
@@ -554,9 +744,335 @@ def create_app(test_config=None):
     return app
 
 
+def serialize_reminder(row):
+    row["fecha"] = row["fecha"].isoformat()
+    row["hora"] = row["hora"].strftime("%H:%M") if row["hora"] is not None else None
+    return row
+
+
+def valid_reminder_text(text):
+    if not isinstance(text, str) or not text.strip() or "\x00" in text:
+        raise APIError("texto debe ser una cadena no vacía y sin caracteres nulos", 400)
+    return text
+
+
+def valid_reminder_time(hour):
+    if hour is not None:
+        if not isinstance(hour, str) or not re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", hour):
+            raise APIError("hora debe tener el formato HH:MM o ser null", 400)
+        return time.fromisoformat(hour)
+    return None
+
+
+def reminder_date(year, original):
+    day = original.day
+    if original.month == 2 and day == 29 and (year % 4 != 0 or (year % 100 == 0 and year % 400 != 0)):
+        day = 28
+    return date(year, original.month, day)
+
+
+CSV_COLUMNS = (
+    "tipo", "ref", "fecha", "fecha_original", "nombre", "descripcion", "duracion", "restantes",
+    "color", "laborable", "en_borde", "es_prevision", "hora", "texto", "repetir", "version", "anio", "activo",
+)
+CSV_FIELDS = {
+    "calendario": {"version", "anio"},
+    "proyecto": {"ref", "nombre", "descripcion", "duracion", "restantes", "color", "laborable", "activo"},
+    "tipo_fecha": {"ref", "nombre", "descripcion", "color", "en_borde", "activo"},
+    "asignacion": {"ref", "fecha", "es_prevision"},
+    "tipado": {"ref", "fecha"},
+    "nota": {"fecha", "texto"},
+    "recordatorio": {"fecha", "fecha_original", "hora", "texto", "repetir"},
+}
+
+
+def csv_encode(value):
+    if value is None:
+        return r"\N"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, time):
+        return value.isoformat(timespec="minutes") if value.second == 0 and value.microsecond == 0 else value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if not isinstance(value, str):
+        return str(value)
+    if value.startswith("\\"):
+        return "\\" + value
+    if value.startswith("'") or value.lstrip(" \t\r\n").startswith(("=", "+", "-", "@")) or value.startswith(("\t", "\r", "\n")):
+        return "'" + value
+    return value
+
+
+def csv_decode(value):
+    if value == r"\N":
+        return None
+    if value.startswith("\\"):
+        if not value.startswith("\\\\"):
+            raise APIError("Escape inválido en el CSV", 400)
+        return value[1:]
+    if value.startswith("''") or (value.startswith("'") and (
+        value[1:].lstrip(" \t\r\n").startswith(("=", "+", "-", "@")) or value[1:].startswith(("\t", "\r", "\n"))
+    )):
+        return value[1:]
+    return value
+
+
+def export_calendar_csv(db, user_id, year):
+    output = io.StringIO(newline="")
+    writer = csv.DictWriter(output, fieldnames=CSV_COLUMNS, lineterminator="\r\n")
+    writer.writeheader()
+
+    def write(kind, **values):
+        writer.writerow({"tipo": kind, **{key: csv_encode(value) for key, value in values.items()}})
+
+    write("calendario", version=1 if year is not None else 2, anio=year)
+    start = date(year or 1, 1, 1)
+    end = date(year or 9999, 12, 31)
+    if not db.execute(
+        """SELECT 1 FROM (
+               SELECT fecha FROM asignaciones WHERE usuario_id = %s
+               UNION ALL SELECT fecha FROM tipados WHERE usuario_id = %s
+               UNION ALL SELECT fecha FROM notas WHERE usuario_id = %s
+               UNION ALL SELECT fecha FROM recordatorios WHERE usuario_id = %s
+           ) AS dias WHERE fecha BETWEEN %s AND %s LIMIT 1""",
+        (user_id, user_id, user_id, user_id, start, end),
+    ).fetchone():
+        raise APIError("No hay datos de calendario para exportar", 404)
+    projects = db.execute(
+        """SELECT DISTINCT p.* FROM proyectos p JOIN asignaciones a USING (proyecto_id)
+           WHERE a.usuario_id = %s AND a.fecha BETWEEN %s AND %s ORDER BY p.proyecto_id""",
+        (user_id, start, end),
+    ).fetchall()
+    types = db.execute(
+        """SELECT DISTINCT tf.* FROM tipos_fecha tf JOIN tipados t USING (tipo_id)
+           WHERE t.usuario_id = %s AND t.fecha BETWEEN %s AND %s ORDER BY tf.tipo_id""",
+        (user_id, start, end),
+    ).fetchall()
+    for row in projects:
+        write("proyecto", ref=f"p{row['proyecto_id']}", **{key: row[key] for key in PROJECT_FIELDS})
+    for row in types:
+        write("tipo_fecha", ref=f"t{row['tipo_id']}", **{key: row[key] for key in TYPE_FIELDS})
+    for row in db.execute(
+        """SELECT fecha, proyecto_id, es_prevision FROM asignaciones
+           WHERE usuario_id = %s AND fecha BETWEEN %s AND %s ORDER BY fecha, proyecto_id, es_prevision""",
+        (user_id, start, end),
+    ).fetchall():
+        write("asignacion", ref=f"p{row['proyecto_id']}", fecha=row["fecha"], es_prevision=row["es_prevision"])
+    for row in db.execute(
+        """SELECT fecha, tipo_id FROM tipados WHERE usuario_id = %s AND fecha BETWEEN %s AND %s
+           ORDER BY fecha, tipo_id""",
+        (user_id, start, end),
+    ).fetchall():
+        write("tipado", ref=f"t{row['tipo_id']}", fecha=row["fecha"])
+    for row in db.execute(
+        "SELECT fecha, texto FROM notas WHERE usuario_id = %s AND fecha BETWEEN %s AND %s ORDER BY fecha",
+        (user_id, start, end),
+    ).fetchall():
+        write("nota", **row)
+    for row in db.execute(
+        """SELECT fecha, fecha_original, hora, texto, repetir FROM recordatorios
+           WHERE usuario_id = %s AND fecha BETWEEN %s AND %s ORDER BY fecha, hora NULLS FIRST, recordatorio_id""",
+        (user_id, start, end),
+    ).fetchall():
+        write("recordatorio", **row)
+    return output.getvalue()
+
+
+def parse_calendar_csv(content):
+    try:
+        text = content.decode("utf-8-sig")
+    except UnicodeDecodeError as error:
+        raise APIError("El CSV debe estar codificado en UTF-8", 400) from error
+    if "\x00" in text:
+        raise APIError("El CSV no puede contener caracteres nulos", 400)
+    try:
+        reader = csv.reader(io.StringIO(text, newline=""), strict=True)
+        header = next(reader, None)
+        if header not in (list(CSV_COLUMNS), list(CSV_COLUMNS[:-1])):
+            raise APIError("La cabecera del CSV no corresponde al formato de Calendar", 400)
+        rows = list(reader)
+    except csv.Error as error:
+        raise APIError(f"CSV inválido: {error}", 400) from error
+    records = []
+    for index, values in enumerate(rows, start=2):
+        if len(values) != len(header):
+            raise APIError(f"Fila {index}: número de columnas incorrecto", 400)
+        row = dict(zip(header, values))
+        kind = row["tipo"]
+        if kind not in CSV_FIELDS:
+            raise APIError(f"Fila {index}: tipo de registro desconocido", 400)
+        if any(row.get(key) for key in set(CSV_COLUMNS) - CSV_FIELDS[kind] - {"tipo"}):
+            raise APIError(f"Fila {index}: columnas inesperadas", 400)
+        row = {key: csv_decode(row[key]) for key in CSV_FIELDS[kind] if key in row}
+        row["tipo"] = kind
+        records.append(row)
+    if not records or records[0]["tipo"] != "calendario" or any(
+        row["tipo"] == "calendario" for row in records[1:]
+    ):
+        raise APIError("El CSV debe comenzar con un único registro de calendario", 400)
+    header = records.pop(0)
+    if header["version"] == "2" and header["anio"] is None:
+        year = None
+    elif header["version"] == "1" and isinstance(header["anio"], str) and re.fullmatch(r"[0-9]{1,4}", header["anio"]):
+        year = int(header["anio"])
+        if not 1 <= year <= 9999:
+            raise APIError("El año del CSV debe estar entre 1 y 9999", 400)
+    else:
+        raise APIError("Versión o año del CSV inválido", 400)
+    if not any(row["tipo"] in ("asignacion", "tipado", "nota", "recordatorio") for row in records):
+        raise APIError("El CSV no contiene datos para el año indicado", 400)
+    return year, records
+
+
+def csv_boolean(value, nullable=False):
+    if nullable and value is None:
+        return None
+    if value not in ("true", "false"):
+        raise APIError("El CSV contiene un valor booleano inválido", 400)
+    return value == "true"
+
+
+def csv_integer(value):
+    if value is None:
+        return None
+    if not isinstance(value, str) or not re.fullmatch(r"-?[0-9]{1,5}", value):
+        raise APIError("El CSV contiene un número inválido", 400)
+    return int(value)
+
+
+def csv_reminder_time(value):
+    if value is None:
+        return None
+    if not isinstance(value, str) or not re.fullmatch(
+        r"(?:[01][0-9]|2[0-3]):[0-5][0-9](?::[0-5][0-9](?:\.[0-9]{1,6})?)?", value
+    ):
+        raise APIError("El CSV contiene una hora inválida", 400)
+    return time.fromisoformat(value)
+
+
+def import_calendar_csv(db, user_id, year, records):
+    db.execute("LOCK TABLE tipos_fecha, proyectos IN SHARE ROW EXCLUSIVE MODE")
+    project_refs = {}
+    type_refs = {}
+    new_projects = set()
+    used_ids = {"proyecto": set(), "tipo_fecha": set()}
+    for row in records:
+        kind = row["tipo"]
+        if kind not in ("proyecto", "tipo_fecha"):
+            continue
+        ref = row["ref"]
+        refs = project_refs if kind == "proyecto" else type_refs
+        prefix = "p" if kind == "proyecto" else "t"
+        if not isinstance(ref, str) or not re.fullmatch(prefix + r"[1-9][0-9]*", ref) or ref in refs:
+            raise APIError("Referencia de catálogo inválida o duplicada", 400)
+        fields = PROJECT_FIELDS if kind == "proyecto" else TYPE_FIELDS
+        values = {key: row[key] for key in fields if key in row}
+        if "activo" in values:
+            values["activo"] = csv_boolean(values["activo"])
+        if kind == "proyecto":
+            values["laborable"] = csv_boolean(values["laborable"])
+            values["duracion"] = csv_integer(values["duracion"])
+            values["restantes"] = csv_integer(values["restantes"])
+            table, id_column = "proyectos", "proyecto_id"
+        else:
+            values["en_borde"] = csv_boolean(values["en_borde"], nullable=True)
+            table, id_column = "tipos_fecha", "tipo_id"
+        validated = validate_fields({key: value for key, value in values.items()
+                                     if key != "en_borde" or value is not None}, fields)
+        if kind == "tipo_fecha" and values["en_borde"] is None:
+            validated["en_borde"] = None
+        if kind == "tipo_fecha" and validated["nombre"] == "Festivo" and validated["en_borde"] is not False:
+            raise APIError("El tipo Festivo no está configurado correctamente en el CSV", 409)
+        matches = db.execute(
+            sql.SQL("SELECT * FROM {} WHERE nombre IS NOT DISTINCT FROM %s ORDER BY {} FOR UPDATE").format(
+                sql.Identifier(table), sql.Identifier(id_column)), (validated["nombre"],)
+        ).fetchall()
+        if len(matches) > 1:
+            raise APIError(f"Hay varios registros de {kind} con el nombre {validated['nombre']!r}", 409)
+        if matches:
+            match = matches[0]
+            if any(match[key] != value for key, value in validated.items() if key != "activo"):
+                raise APIError(f"Los datos de {kind} {validated['nombre']!r} no coinciden con el catálogo existente", 409)
+        else:
+            match = insert(table, validated)
+            if kind == "proyecto":
+                new_projects.add(match[id_column])
+        identifier = match[id_column]
+        if identifier in used_ids[kind]:
+            raise APIError(f"El CSV contiene varios registros de {kind} con el mismo nombre", 409)
+        used_ids[kind].add(identifier)
+        refs[ref] = identifier
+    db.execute("SELECT usuario_id FROM usuarios WHERE usuario_id = %s FOR UPDATE", (user_id,))
+    counts = {"asignaciones": 0, "tipados": 0, "notas": 0, "recordatorios": 0}
+    existing_reminders = {
+        (row["fecha"], row["hora"], row["texto"])
+        for row in db.execute(
+            "SELECT fecha, hora, texto FROM recordatorios WHERE usuario_id = %s AND fecha BETWEEN %s AND %s",
+            (user_id, date(year or 1, 1, 1), date(year or 9999, 12, 31)),
+        ).fetchall()
+    }
+    for row in records:
+        kind = row["tipo"]
+        if kind in ("proyecto", "tipo_fecha"):
+            continue
+        day = valid_date(row["fecha"])
+        if year is not None and day.year != year:
+            raise APIError("Todas las fechas del CSV deben pertenecer al año indicado", 400)
+        if kind == "asignacion":
+            project_id = project_refs.get(row["ref"])
+            if project_id is None:
+                raise APIError("La asignación referencia un proyecto inexistente en el CSV", 400)
+            forecast = csv_boolean(row["es_prevision"])
+            inserted = db.execute(
+                """INSERT INTO asignaciones (usuario_id, fecha, proyecto_id, es_prevision) VALUES (%s, %s, %s, %s)
+                   ON CONFLICT DO NOTHING RETURNING proyecto_id""",
+                (user_id, day, project_id, forecast),
+            ).fetchone()
+            if not inserted:
+                raise APIError(f"{day.isoformat()}: el proyecto ya está asignado", 409)
+            if not forecast and project_id not in new_projects:
+                change_remaining(db, project_id, -1)
+            counts["asignaciones"] += 1
+        elif kind == "tipado":
+            type_id = type_refs.get(row["ref"])
+            if type_id is None:
+                raise APIError("El tipado referencia un tipo inexistente en el CSV", 400)
+            try:
+                insert_typing(db, day, type_id, require_active=False)
+            except APIError as error:
+                raise APIError(f"{day.isoformat()}: {error.message}", error.status) from error
+            counts["tipados"] += 1
+        elif kind == "nota":
+            text = valid_reminder_text(row["texto"])
+            inserted = db.execute(
+                """INSERT INTO notas (usuario_id, fecha, texto) VALUES (%s, %s, %s)
+                   ON CONFLICT DO NOTHING RETURNING fecha""", (user_id, day, text)
+            ).fetchone()
+            if not inserted:
+                raise APIError(f"{day.isoformat()}: ya existe una nota", 409)
+            counts["notas"] += 1
+        elif kind == "recordatorio":
+            original = valid_date(row["fecha_original"])
+            hour = csv_reminder_time(row["hora"])
+            text = valid_reminder_text(row["texto"])
+            repeat = csv_boolean(row["repetir"])
+            if repeat and reminder_date(day.year, original) != day:
+                raise APIError("La fecha original del recordatorio no corresponde a su repetición", 400)
+            if (day, hour, text) in existing_reminders:
+                raise APIError(f"{day.isoformat()}: ya existe un recordatorio con la misma hora y texto", 409)
+            db.execute(
+                """INSERT INTO recordatorios (usuario_id, fecha, fecha_original, hora, texto, repetir)
+                   VALUES (%s, %s, %s, %s, %s, %s)""", (user_id, day, original, hour, text, repeat)
+            )
+            existing_reminders.add((day, hour, text))
+            counts["recordatorios"] += 1
+    return counts
+
+
 USER_FIELDS = {"nombre", "apellido1", "apellido2", "es_administrador", "activo"}
-PROJECT_FIELDS = {"nombre", "descripcion", "duracion", "restantes", "color", "laborable"}
-TYPE_FIELDS = {"nombre", "descripcion", "color", "en_borde"}
+PROJECT_FIELDS = {"nombre", "descripcion", "duracion", "restantes", "color", "laborable", "activo"}
+TYPE_FIELDS = {"nombre", "descripcion", "color", "en_borde", "activo"}
 BOOLEAN_FIELDS = {"es_administrador", "activo", "en_borde", "laborable"}
 TEXT_FIELDS = {"nombre", "apellido1", "apellido2", "descripcion", "color"}
 
@@ -567,9 +1083,12 @@ def get_db():
     return g.db
 
 
-def lock_project(db, project_id):
-    if not db.execute("SELECT proyecto_id FROM proyectos WHERE proyecto_id = %s FOR UPDATE", (project_id,)).fetchone():
+def lock_project(db, project_id, require_active=False):
+    project = db.execute("SELECT activo FROM proyectos WHERE proyecto_id = %s FOR UPDATE", (project_id,)).fetchone()
+    if not project:
         raise APIError("Proyecto no encontrado", 404)
+    if require_active and not project["activo"]:
+        raise APIError("Solo se pueden asignar proyectos activos", 409)
 
 
 def change_remaining(db, project_id, amount):
@@ -586,12 +1105,14 @@ def change_remaining(db, project_id, amount):
         raise APIError(message, 409)
 
 
-def insert_typing(db, day, type_id):
+def insert_typing(db, day, type_id, require_active=True):
     kind = db.execute(
-        "SELECT en_borde FROM tipos_fecha WHERE tipo_id = %s FOR SHARE", (type_id,)
+        "SELECT en_borde, activo FROM tipos_fecha WHERE tipo_id = %s FOR SHARE", (type_id,)
     ).fetchone()
     if not kind:
         raise APIError("Tipo de fecha no encontrado", 404)
+    if require_active and not kind["activo"]:
+        raise APIError("Solo se pueden asignar tipos de fecha activos", 409)
     if kind["en_borde"] is None:
         raise APIError("El tipo de fecha debe tener en_borde definido", 409)
     db.execute("SELECT usuario_id FROM usuarios WHERE usuario_id = %s FOR UPDATE", (g.user["usuario_id"],))

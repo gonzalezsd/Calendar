@@ -37,15 +37,15 @@ export class DateTypesComponent implements OnInit {
   }
 
   private emptyType(): EditableType {
-    return { nombre: '', descripcion: '', color: '#ef4444', en_borde: false };
+    return { nombre: '', descripcion: '', color: '#ef4444', en_borde: false, activo: false };
   }
 
   async saveType(form: NgForm): Promise<void> {
     if (form.invalid) return;
     await this.state.run(async () => {
-      const { nombre, descripcion, color, en_borde } = this.typeForm;
+      const { nombre, descripcion, color, en_borde, activo } = this.typeForm;
       const current = this.dateTypes.find(type => type.tipo_id === this.editingId);
-      const payload: Record<string, unknown> = { nombre, descripcion, color };
+      const payload: Record<string, unknown> = { nombre, descripcion, color, activo };
       if (!current || en_borde !== current.en_borde) payload['en_borde'] = en_borde;
       const url = this.editingId === null ? '/api/tipos-fecha' : `/api/tipos-fecha/${this.editingId}`;
       await this.state.request(this.editingId === null ? 'POST' : 'PATCH', url, payload);

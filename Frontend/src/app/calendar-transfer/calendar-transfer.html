@@ -1,0 +1,28 @@
+<div class="section-heading">
+  <div><p class="eyebrow">CONFIGURACIÓN</p><h2>Importar/exportar calendario</h2>
+    <p class="muted">Solo se importan y exportan los datos de tu usuario.</p></div>
+</div>
+<div class="management-layout">
+  <section class="panel">
+    <h3>Exportar calendario</h3>
+    <div class="form-stack">
+      <label>Año
+        <select [(ngModel)]="exportYear" [disabled]="state.loading || !state.years.length">
+          @if (!state.years.length) { <option [ngValue]="null">Sin años</option> }
+          @if (state.years.length) { <option [ngValue]="'all'">Todos los años</option> }
+          @for (year of state.years; track year) { <option [ngValue]="year">{{ year }}</option> }
+        </select>
+      </label>
+      <button type="button" class="primary" [disabled]="state.loading || exportYear === null"
+              (click)="exportCalendar()">Exportar CSV</button>
+    </div>
+  </section>
+  <section class="panel">
+    <h3>Importar calendario</h3>
+    <p class="muted">Se utilizan los años del CSV. Si hay conflictos, no se importará ningún dato.</p>
+    <div class="form-stack">
+      <label>Archivo CSV <input #csvFile type="file" accept=".csv,text/csv" (change)="selectFile($event)" [disabled]="state.loading"></label>
+      <button type="button" class="primary" [disabled]="state.loading || !file" (click)="importCalendar()">Importar CSV</button>
+    </div>
+  </section>
+</div>

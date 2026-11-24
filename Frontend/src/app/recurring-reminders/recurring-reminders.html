@@ -1,0 +1,40 @@
+<div class="section-heading">
+  <div><p class="eyebrow">CONFIGURACIÓN</p><h2>Recordatorios anuales</h2>
+    <p class="muted">Los cambios se aplican a todas las ocurrencias existentes y futuras.</p></div>
+</div>
+<div class="management-layout">
+  <section class="panel">
+    <h3>Recordatorios que se repiten</h3>
+    @if (!loaded && !state.loading) {
+      <button type="button" class="secondary" (click)="ngOnInit()">Reintentar carga</button>
+    } @else if (loaded && !reminders.length) {
+      <p class="muted">No hay recordatorios anuales.</p>
+    }
+    @for (reminder of reminders; track reminder.recordatorio_id) {
+      <div class="list-item">
+        <div><strong>{{ reminder.dia }}/{{ reminder.mes }} · {{ reminder.hora ?? 'Todo el día' }}</strong><small class="reminder-text">{{ reminder.texto }}</small></div>
+        <button type="button" class="secondary" (click)="editReminder(reminder)" [disabled]="state.loading">Editar</button>
+      </div>
+    }
+  </section>
+  @if (editingId !== null) {
+    <section class="panel">
+      <h3>Editar recordatorio anual</h3>
+      <form #reminderFormRef="ngForm" (ngSubmit)="saveReminder(reminderFormRef)" class="form-stack">
+        <div class="form-row">
+          <label>Día <input type="number" name="dia" min="1" max="31" step="1" [(ngModel)]="reminderForm.dia" required></label>
+          <label>Mes <input type="number" name="mes" min="1" max="12" step="1" [(ngModel)]="reminderForm.mes" required></label>
+        </div>
+        @if (!validDate) { <p class="muted">Introduce un día y mes válidos.</p> }
+        <label>Hora (opcional) <input type="time" name="hora" [(ngModel)]="reminderForm.hora"></label>
+        <label>Texto <textarea name="texto" rows="3" [(ngModel)]="reminderForm.texto" required></textarea></label>
+        <label class="check"><input type="checkbox" name="repetir" [(ngModel)]="reminderForm.repetir"> Repetir cada año</label>
+        @if (!reminderForm.repetir) { <p class="muted">Dejará de copiarse a nuevos años y desaparecerá de esta lista.</p> }
+        <div class="form-actions">
+          <button type="submit" class="primary" [disabled]="state.loading || reminderFormRef.invalid || !validDate || !reminderForm.texto.trim()">Guardar</button>
+          <button type="button" class="secondary" (click)="resetForm()" [disabled]="state.loading">Cancelar</button>
+        </div>
+      </form>
+    </section>
+  }
+</div>

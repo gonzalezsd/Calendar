@@ -1,3 +1,5 @@
+import csv
+import io
 import unittest
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -88,7 +90,7 @@ class APITests(unittest.TestCase):
     def test_per_user_assignment_and_deletion(self):
         self.create_user("other")
         other = self.login("other", "password123")
-        project = self.client.post("/api/proyectos", headers=self.admin, json={"nombre": "Proyecto"})
+        project = self.client.post("/api/proyectos", headers=self.admin, json={"nombre": "Proyecto", "activo": True})
         self.assertEqual(project.status_code, 201, project.json)
         project_id = project.json["proyecto_id"]
         assignment = {"fecha": "2026-01-01", "proyecto_id": project_id, "es_prevision": False}
@@ -143,8 +145,339 @@ class APITests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/calendario/2031", headers=self.admin).json["notas"],
                          [{"fecha": "2031-02-03", "texto": "Migrada"}])
 
+    def test_reminders_are_private_and_validate_date_time_and_text(self):
+        self.create_user("other")
+        other = self.login("other", "password123")
+        path = "/api/recordatorios"
+        daily = {"fecha": "2031-02-03", "hora": None, "texto": "Día completo\n<literal>", "repetir": True}
+        timed = {"fecha": "2031-02-03", "hora": "09:30", "texto": "Cita", "repetir": False}
+        self.assertEqual(self.client.post(path, json=daily).status_code, 401)
+        first = self.client.post(path, headers=self.admin, json=daily)
+        second = self.client.post(path, headers=self.admin, json=timed)
+        self.assertEqual(first.status_code, 201, first.json)
+        self.assertEqual(second.status_code, 201, second.json)
+        self.assertEqual({key: first.json[key] for key in daily}, daily)
+        self.assertEqual({key: second.json[key] for key in timed}, timed)
+        self.assertEqual(self.client.get(path + "/2031-02-03", headers=self.admin).json,
+                         [first.json, second.json])
+        self.assertEqual(self.client.get(path + "/2031-02-03", headers=other).json, [])
+        self.assertEqual(self.client.get("/api/calendario/2031", headers=self.admin).json["recordatorios"],
+                         [first.json, second.json])
+        self.assertEqual(self.client.get("/api/calendario/2031", headers=other).json["recordatorios"], [])
+        self.assertEqual(self.client.get("/api/get_years", headers=self.admin).json["years"], [2031])
+        invalid = [
+            {**daily, "fecha": "2031-02-30"}, {**daily, "hora": "24:00"},
+            {**daily, "hora": "09:30:00"}, {**daily, "hora": 9}, {**daily, "texto": "  "},
+            {**daily, "texto": "a\u0000b"}, {**daily, "repetir": 1}, {**daily, "usuario_id": 2},
+        ]
+        for value in invalid:
+            with self.subTest(value=value):
+                self.assertEqual(self.client.post(path, headers=self.admin, json=value).status_code, 400)
+        self.assertEqual(self.client.get(path + "/2031-02-30", headers=self.admin).status_code, 400)
+        self.assertEqual(len(self.client.get(path + "/2031-02-03", headers=self.admin).json), 2)
+
+    def test_new_year_copies_recurring_reminders_without_duplicates_and_preserves_leap_day(self):
+        self.create_user("other")
+        other = self.login("other", "password123")
+        def create(token, day, text, repeat=True, hour=None):
+            response = self.client.post("/api/recordatorios", headers=token, json={
+                "fecha": day, "hora": hour, "texto": text, "repetir": repeat,
+            })
+            self.assertEqual(response.status_code, 201, response.json)
+        create(self.admin, "2024-02-29", "Bisiesto")
+        create(self.admin, "2024-03-05", "Cita", hour="09:30")
+        create(self.admin, "2026-03-05", "Cita", hour="09:30")
+        create(self.admin, "2035-05-01", "Desde el futuro")
+        create(self.admin, "2024-06-01", "No repetir", repeat=False)
+        create(self.admin, "2029-03-05", "Cita", repeat=False, hour="09:30")
+        create(other, "2024-07-01", "Privado")
+        self.assertEqual(self.client.post("/api/new_year", headers=self.admin, json={"year": 2029}).status_code, 201)
+        reminders = self.client.get("/api/calendario/2029", headers=self.admin).json["recordatorios"]
+        self.assertEqual([(r["fecha"], r["texto"]) for r in reminders], [
+            ("2029-02-28", "Bisiesto"), ("2029-03-05", "Cita"), ("2029-05-01", "Desde el futuro")
+        ])
+        self.assertEqual(self.client.post("/api/new_year", headers=self.admin, json={"year": 2032}).status_code, 201)
+        reminders = self.client.get("/api/calendario/2032", headers=self.admin).json["recordatorios"]
+        self.assertEqual([(r["fecha"], r["texto"]) for r in reminders], [
+            ("2032-02-29", "Bisiesto"), ("2032-03-05", "Cita"), ("2032-05-01", "Desde el futuro")
+        ])
+        self.assertEqual(self.client.get("/api/calendario/2032", headers=other).json["recordatorios"], [])
+        self.assertEqual(self.client.post("/api/new_year", headers=self.admin, json={"year": 2029}).status_code, 409)
+        self.assertEqual(len(self.client.get("/api/calendario/2029", headers=self.admin).json["recordatorios"]), 3)
+
+    def test_reminder_migration_for_existing_schema(self):
+        with psycopg.connect(self.url, autocommit=True) as db:
+            db.execute("DROP TABLE recordatorios")
+            db.execute((ROOT / "DB/06_crear_recordatorios.sql").read_text())
+        response = self.client.post("/api/recordatorios", headers=self.admin, json={
+            "fecha": "2031-02-03", "texto": "Migrado", "repetir": False,
+        })
+        self.assertEqual(response.status_code, 201, response.json)
+        self.assertIsNone(response.json["hora"])
+
+    def test_edit_recurring_reminders_updates_all_occurrences_and_future_years(self):
+        self.create_user("other")
+        other = self.login("other", "password123")
+        def create(token, day, text, repeat=True):
+            response = self.client.post("/api/recordatorios", headers=token, json={
+                "fecha": day, "hora": None, "texto": text, "repetir": repeat,
+            })
+            self.assertEqual(response.status_code, 201, response.json)
+            return response.json["recordatorio_id"]
+        reminder_id = create(self.admin, "2024-02-29", "Cumpleaños")
+        create(self.admin, "2036-02-29", "Cumpleaños")
+        create(self.admin, "2025-02-28", "Otro", repeat=False)
+        other_id = create(other, "2024-02-29", "Cumpleaños")
+        self.assertEqual(self.client.post("/api/new_year", headers=self.admin, json={"year": 2025}).status_code, 201)
+        listed = self.client.get("/api/recordatorios/recurrentes", headers=self.admin)
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(listed.json, [{"recordatorio_id": reminder_id, "mes": 2, "dia": 29,
+                                        "hora": None, "texto": "Cumpleaños", "repetir": True}])
+        payload = {"mes": 3, "dia": 1, "hora": "10:15", "texto": "Actualizado", "repetir": True}
+        self.assertEqual(self.client.patch(f"/api/recordatorios/{other_id}", headers=self.admin, json=payload).status_code, 404)
+        response = self.client.patch(f"/api/recordatorios/{reminder_id}", headers=self.admin, json=payload)
+        self.assertEqual(response.status_code, 200, response.json)
+        for year in (2024, 2025, 2036):
+            reminders = self.client.get(f"/api/calendario/{year}", headers=self.admin).json["recordatorios"]
+            matching = [r for r in reminders if r["texto"] == "Actualizado"]
+            self.assertEqual(len(matching), 1)
+            self.assertEqual((matching[0]["fecha"], matching[0]["hora"], matching[0]["repetir"]),
+                             (f"{year}-03-01", "10:15", True))
+        self.assertEqual(self.client.get("/api/recordatorios/2024-02-29", headers=other).json[0]["texto"], "Cumpleaños")
+        self.assertEqual(self.client.post("/api/new_year", headers=self.admin, json={"year": 2026}).status_code, 201)
+        self.assertEqual(self.client.get("/api/recordatorios/2026-03-01", headers=self.admin).json[0]["texto"], "Actualizado")
+        payload.update({"mes": 2, "dia": 29, "hora": None, "repetir": False})
+        self.assertEqual(self.client.patch(f"/api/recordatorios/{reminder_id}", headers=self.admin, json=payload).status_code, 200)
+        self.assertEqual(self.client.get("/api/recordatorios/recurrentes", headers=self.admin).json, [])
+        for year, day in ((2024, 29), (2025, 28), (2026, 28), (2036, 29)):
+            reminders = self.client.get(f"/api/recordatorios/{year}-02-{day}", headers=self.admin).json
+            self.assertEqual(sum(r["texto"] == "Actualizado" and not r["repetir"] for r in reminders), 1)
+        self.assertEqual(self.client.post("/api/new_year", headers=self.admin, json={"year": 2028}).status_code, 201)
+        self.assertEqual(self.client.get("/api/recordatorios/2028-02-29", headers=self.admin).json, [])
+
+    def test_recurring_reminder_edit_rejects_invalid_and_conflicting_updates(self):
+        def create(day, text):
+            return self.client.post("/api/recordatorios", headers=self.admin, json={
+                "fecha": day, "texto": text, "repetir": True,
+            }).json["recordatorio_id"]
+        first = create("2024-02-29", "Primero")
+        create("2024-03-01", "Segundo")
+        payload = {"mes": 3, "dia": 1, "hora": None, "texto": "Segundo", "repetir": True}
+        self.assertEqual(self.client.patch(f"/api/recordatorios/{first}", headers=self.admin, json=payload).status_code, 409)
+        for change in ({"mes": 2, "dia": 30}, {"mes": True}, {"dia": 10**100},
+                       {"hora": "25:00"}, {"texto": " "}, {"repetir": 1}):
+            with self.subTest(change=change):
+                self.assertEqual(self.client.patch(f"/api/recordatorios/{first}", headers=self.admin,
+                                                   json={**payload, **change}).status_code, 400)
+        self.assertEqual(self.client.patch(f"/api/recordatorios/{first}", json=payload).status_code, 401)
+        self.assertEqual(self.client.get("/api/recordatorios/2024-02-29", headers=self.admin).json[0]["texto"], "Primero")
+
+    def test_calendar_csv_round_trip_is_private_and_adjusts_existing_project_balance(self):
+        self.create_user("other")
+        other = self.login("other", "password123")
+        project = self.client.post("/api/proyectos", headers=self.admin, json={
+            "nombre": "Trabajo, especial", "descripcion": "Primera\nsegunda", "restantes": 3,
+            "duracion": 10, "color": "#123456", "laborable": True, "activo": True,
+        }).json
+        day = "2025-03-03"
+        for forecast in (False, True):
+            self.assertEqual(self.client.post("/api/asignaciones", headers=self.admin, json={
+                "fecha": day, "proyecto_id": project["proyecto_id"], "es_prevision": forecast,
+            }).status_code, 201)
+        type_id = self.client.post("/api/tipos-fecha", headers=self.admin, json={
+            "nombre": "Especial", "color": "#ABCDEF", "en_borde": True, "activo": True,
+        }).json["tipo_id"]
+        self.assertEqual(self.client.post("/api/tipados", headers=self.admin, json={
+            "fecha": day, "tipo_id": type_id,
+        }).status_code, 201)
+        note = '=1+1, con "comillas"\ny \\N'
+        self.assertEqual(self.client.put(f"/api/notas/{day}", headers=self.admin, json={"texto": note}).status_code, 200)
+        self.assertEqual(self.client.post("/api/recordatorios", headers=self.admin, json={
+            "fecha": day, "hora": "10:30", "texto": "\\N", "repetir": True,
+        }).status_code, 201)
+        self.assertEqual(self.client.post("/api/recordatorios", headers=self.admin, json={
+            "fecha": day, "hora": None, "texto": "Todo el día", "repetir": False,
+        }).status_code, 201)
+        self.assertEqual(self.client.get("/api/calendario/2025/exportar").status_code, 401)
+        exported = self.client.get("/api/calendario/2025/exportar", headers=self.admin)
+        self.assertEqual(exported.status_code, 200)
+        self.assertEqual(exported.mimetype, "text/csv")
+        csv_rows = list(csv.DictReader(io.StringIO(exported.data.decode(), newline="")))
+        self.assertTrue(next(row["texto"] for row in csv_rows if row["tipo"] == "nota").startswith("'=1+1"))
+        result = self.client.post("/api/calendario/importar", headers=other, data=exported.data, content_type="text/csv")
+        self.assertEqual(result.status_code, 201, result.json)
+        self.assertEqual(result.json, {"year": 2025, "asignaciones": 2, "tipados": 1, "notas": 1, "recordatorios": 2})
+        calendar = self.client.get("/api/calendario/2025", headers=other).json
+        self.assertEqual(calendar["notas"], [{"fecha": day, "texto": note}])
+        self.assertEqual([(r["hora"], r["texto"]) for r in calendar["recordatorios"]],
+                         [(None, "Todo el día"), ("10:30", "\\N")])
+        self.assertEqual({a["es_prevision"] for a in calendar["asignaciones"]}, {True, False})
+        self.assertEqual(calendar["tipados"][0]["tipo_id"], type_id)
+        projects = self.client.get("/api/proyectos", headers=self.admin).json
+        self.assertEqual(next(p["restantes"] for p in projects if p["proyecto_id"] == project["proyecto_id"]), 1)
+        repeat = self.client.post("/api/calendario/importar", headers=other, data=exported.data, content_type="text/csv")
+        self.assertEqual(repeat.status_code, 409)
+        projects = self.client.get("/api/proyectos", headers=self.admin).json
+        self.assertEqual(next(p["restantes"] for p in projects if p["proyecto_id"] == project["proyecto_id"]), 1)
+        self.assertEqual(len(self.client.get("/api/calendario/2025", headers=other).json["asignaciones"]), 2)
+
+    def test_full_calendar_csv_round_trip_and_atomic_conflict(self):
+        self.create_user("other")
+        other = self.login("other", "password123")
+        self.assertEqual(self.client.get("/api/calendario/exportar").status_code, 401)
+        self.assertEqual(self.client.get("/api/calendario/exportar", headers=self.admin).status_code, 404)
+        project_id = self.client.post("/api/proyectos", headers=self.admin, json={
+            "nombre": "Trabajo", "laborable": True, "activo": True,
+        }).json["proyecto_id"]
+        type_id = self.client.post("/api/tipos-fecha", headers=self.admin, json={
+            "nombre": "Especial", "en_borde": True, "activo": True,
+        }).json["tipo_id"]
+        for day in ("2024-02-29", "2025-02-28"):
+            self.assertEqual(self.client.post("/api/asignaciones", headers=self.admin, json={
+                "fecha": day, "proyecto_id": project_id, "es_prevision": day.startswith("2025"),
+            }).status_code, 201)
+            self.assertEqual(self.client.post("/api/tipados", headers=self.admin, json={
+                "fecha": day, "tipo_id": type_id,
+            }).status_code, 201)
+            self.assertEqual(self.client.put(f"/api/notas/{day}", headers=self.admin, json={"texto": day}).status_code, 200)
+        with psycopg.connect(self.url, autocommit=True) as db:
+            db.execute(
+                """INSERT INTO recordatorios (usuario_id, fecha, fecha_original, hora, texto, repetir)
+                   VALUES (1, '2024-02-29', '2024-02-29', NULL, 'Bisiesto', true),
+                          (1, '2025-02-28', '2024-02-29', NULL, 'Bisiesto', true)"""
+            )
+        self.client.put("/api/notas/2030-01-01", headers=other, json={"texto": "Privada"})
+        exported = self.client.get("/api/calendario/exportar", headers=self.admin)
+        self.assertEqual(exported.status_code, 200)
+        self.assertEqual(exported.mimetype, "text/csv")
+        self.assertEqual(exported.headers["Cache-Control"], "no-store")
+        self.assertIn("calendario-completo.csv", exported.headers["Content-Disposition"])
+        rows = list(csv.DictReader(io.StringIO(exported.data.decode(), newline="")))
+        self.assertEqual((rows[0]["version"], rows[0]["anio"]), ("2", r"\N"))
+        self.assertEqual(sum(row["tipo"] == "proyecto" for row in rows), 1)
+        self.assertEqual(sum(row["tipo"] == "tipo_fecha" for row in rows), 1)
+        self.assertNotIn(b"Privada", exported.data)
+
+        output = io.StringIO(newline="")
+        writer = csv.DictWriter(output, fieldnames=rows[0].keys(), lineterminator="\r\n")
+        writer.writeheader()
+        writer.writerows(rows)
+        writer.writerow(next(row for row in rows if row["tipo"] == "recordatorio"))
+        duplicate = self.client.post("/api/calendario/importar", headers=other, data=output.getvalue().encode())
+        self.assertEqual(duplicate.status_code, 409, duplicate.json)
+        self.assertEqual(self.client.get("/api/calendario/2024", headers=other).json["asignaciones"], [])
+
+        self.client.put("/api/notas/2025-02-28", headers=other, json={"texto": "Conflicto"})
+        conflict = self.client.post("/api/calendario/importar", headers=other, data=exported.data)
+        self.assertEqual(conflict.status_code, 409, conflict.json)
+        self.assertEqual(self.client.get("/api/calendario/2024", headers=other).json["asignaciones"], [])
+        self.assertEqual(self.client.get("/api/calendario/2024", headers=other).json["notas"], [])
+        self.client.delete("/api/notas/2025-02-28", headers=other)
+        result = self.client.post("/api/calendario/importar", headers=other, data=exported.data)
+        self.assertEqual(result.status_code, 201, result.json)
+        self.assertEqual(result.json, {
+            "years": [2024, 2025], "asignaciones": 2, "tipados": 2, "notas": 2, "recordatorios": 2,
+        })
+        for day in ("2024-02-29", "2025-02-28"):
+            calendar = self.client.get(f"/api/calendario/{day[:4]}", headers=other).json
+            self.assertEqual(calendar["notas"], [{"fecha": day, "texto": day}])
+            self.assertEqual(len(calendar["asignaciones"]), 1)
+            self.assertEqual(len(calendar["tipados"]), 1)
+            self.assertEqual(calendar["recordatorios"][0]["texto"], "Bisiesto")
+        with psycopg.connect(self.url) as db:
+            self.assertEqual(db.execute(
+                "SELECT fecha_original::text FROM recordatorios WHERE usuario_id = 2 AND fecha = '2025-02-28'"
+            ).fetchone()[0], "2024-02-29")
+
+    def test_calendar_csv_new_catalog_conflicts_and_invalid_files_are_atomic(self):
+        self.create_user("other")
+        other = self.login("other", "password123")
+        project_id = self.client.post("/api/proyectos", headers=self.admin, json={
+            "nombre": "Origen", "restantes": 5, "laborable": True, "activo": True,
+        }).json["proyecto_id"]
+        self.client.post("/api/asignaciones", headers=self.admin, json={
+            "fecha": "2031-02-03", "proyecto_id": project_id, "es_prevision": False,
+        })
+        self.client.put("/api/notas/2031-02-03", headers=self.admin, json={"texto": "Nota"})
+        exported = self.client.get("/api/calendario/2031/exportar", headers=self.admin).data.decode("utf-8")
+        rows = list(csv.DictReader(io.StringIO(exported, newline="")))
+        for row in rows:
+            if row["tipo"] == "proyecto":
+                row["nombre"] = "Importado"
+        output = io.StringIO(newline="")
+        writer = csv.DictWriter(output, fieldnames=rows[0].keys(), lineterminator="\r\n")
+        writer.writeheader()
+        writer.writerows(rows)
+        payload = output.getvalue().encode()
+        self.client.put("/api/notas/2031-02-03", headers=other, json={"texto": "Existente"})
+        conflict = self.client.post("/api/calendario/importar", headers=other, data=payload, content_type="text/csv")
+        self.assertEqual(conflict.status_code, 409, conflict.json)
+        self.assertFalse(any(p["nombre"] == "Importado" for p in self.client.get("/api/proyectos", headers=other).json))
+        self.assertEqual(self.client.get("/api/calendario/2031", headers=other).json["asignaciones"], [])
+        self.client.delete("/api/notas/2031-02-03", headers=other)
+        result = self.client.post("/api/calendario/importar", headers=other, data=payload, content_type="text/csv")
+        self.assertEqual(result.status_code, 201, result.json)
+        created = next(p for p in self.client.get("/api/proyectos", headers=other).json if p["nombre"] == "Importado")
+        self.assertEqual(created["restantes"], 4)
+        for invalid in (b"no,csv\n", b"\xff", payload.replace(b"2031-02-03", b"2032-02-03")):
+            with self.subTest(payload=invalid[:15]):
+                response = self.client.post("/api/calendario/importar", headers=self.admin, data=invalid, content_type="text/csv")
+                self.assertEqual(response.status_code, 400, response.json)
+        self.assertEqual(self.client.post("/api/calendario/importar", data=payload, content_type="text/csv").status_code, 401)
+
+    def test_calendar_csv_preserves_original_leap_day_for_future_repetition(self):
+        self.create_user("other")
+        other = self.login("other", "password123")
+        self.assertEqual(self.client.post("/api/recordatorios", headers=self.admin, json={
+            "fecha": "2024-02-29", "texto": "Bisiesto", "repetir": True,
+        }).status_code, 201)
+        self.assertEqual(self.client.post("/api/new_year", headers=self.admin, json={"year": 2025}).status_code, 201)
+        exported = self.client.get("/api/calendario/2025/exportar", headers=self.admin)
+        imported = self.client.post("/api/calendario/importar", headers=other, data=exported.data, content_type="text/csv")
+        self.assertEqual(imported.status_code, 201, imported.json)
+        self.assertEqual(self.client.get("/api/recordatorios/2025-02-28", headers=other).json[0]["texto"], "Bisiesto")
+        self.assertEqual(self.client.post("/api/new_year", headers=other, json={"year": 2028}).status_code, 201)
+        self.assertEqual(self.client.get("/api/recordatorios/2028-02-29", headers=other).json[0]["texto"], "Bisiesto")
+
+    def test_calendar_csv_preserves_long_text_and_time_precision(self):
+        self.create_user("other")
+        other = self.login("other", "password123")
+        text = "'" + "x" * 140000
+        self.assertEqual(self.client.put("/api/notas/2030-01-05", headers=self.admin, json={"texto": text}).status_code, 200)
+        with psycopg.connect(self.url, autocommit=True) as db:
+            db.execute(
+                """INSERT INTO recordatorios (usuario_id, fecha, fecha_original, hora, texto, repetir)
+                   VALUES (1, '2030-01-05', '2030-01-05', '10:30:15.123456', 'Cita', false)"""
+            )
+        exported = self.client.get("/api/calendario/2030/exportar", headers=self.admin)
+        result = self.client.post("/api/calendario/importar", headers=other, data=exported.data, content_type="text/csv")
+        self.assertEqual(result.status_code, 201, result.json)
+        self.assertEqual(self.client.get("/api/calendario/2030", headers=other).json["notas"][0]["texto"], text)
+        with psycopg.connect(self.url, autocommit=True) as db:
+            self.assertEqual(db.execute(
+                "SELECT hora::text FROM recordatorios WHERE usuario_id = 2 AND fecha = '2030-01-05'"
+            ).fetchone()[0], "10:30:15.123456")
+
+    def test_calendar_csv_rejects_insufficient_project_days_without_partial_changes(self):
+        self.create_user("other")
+        other = self.login("other", "password123")
+        project_id = self.client.post("/api/proyectos", headers=self.admin, json={
+            "nombre": "Limitado CSV", "restantes": 1, "activo": True,
+        }).json["proyecto_id"]
+        self.client.post("/api/asignaciones", headers=self.admin, json={
+            "fecha": "2030-05-01", "proyecto_id": project_id, "es_prevision": False,
+        })
+        self.client.put("/api/notas/2030-05-01", headers=self.admin, json={"texto": "Nota"})
+        exported = self.client.get("/api/calendario/2030/exportar", headers=self.admin)
+        result = self.client.post("/api/calendario/importar", headers=other, data=exported.data, content_type="text/csv")
+        self.assertEqual(result.status_code, 409, result.json)
+        self.assertIn("días restantes", result.json["error"])
+        calendar = self.client.get("/api/calendario/2030", headers=other).json
+        self.assertEqual(calendar["asignaciones"], [])
+        self.assertEqual(calendar["notas"], [])
+
     def test_confirm_forecast_and_merge_existing_assignment(self):
-        project = self.client.post("/api/proyectos", headers=self.admin, json={"nombre": "Proyecto"})
+        project = self.client.post("/api/proyectos", headers=self.admin, json={"nombre": "Proyecto", "activo": True})
         project_id = project.json["proyecto_id"]
         self.create_user("other")
         other = self.login("other", "password123")
@@ -170,7 +503,7 @@ class APITests(unittest.TestCase):
 
     def test_remaining_days_for_confirmations_and_deletions(self):
         project_id = self.client.post(
-            "/api/proyectos", headers=self.admin, json={"nombre": "Limitado", "restantes": 2}
+            "/api/proyectos", headers=self.admin, json={"nombre": "Limitado", "restantes": 2, "activo": True}
         ).json["proyecto_id"]
 
         def remaining():
@@ -213,9 +546,9 @@ class APITests(unittest.TestCase):
             "/api/calendario/2026", headers=self.admin).json["asignaciones"]))
 
     def test_multiple_remaining_days_are_atomic(self):
-        limited = self.client.post("/api/proyectos", headers=self.admin, json={"restantes": 1}).json["proyecto_id"]
-        unlimited = self.client.post("/api/proyectos", headers=self.admin, json={"restantes": None}).json["proyecto_id"]
-        type_id = self.client.post("/api/tipos-fecha", headers=self.admin, json={"en_borde": True}).json["tipo_id"]
+        limited = self.client.post("/api/proyectos", headers=self.admin, json={"restantes": 1, "activo": True}).json["proyecto_id"]
+        unlimited = self.client.post("/api/proyectos", headers=self.admin, json={"restantes": None, "activo": True}).json["proyecto_id"]
+        type_id = self.client.post("/api/tipos-fecha", headers=self.admin, json={"en_borde": True, "activo": True}).json["tipo_id"]
         payload = {"fechas": ["2026-02-01", "2026-02-02"], "proyectos": [limited, unlimited],
                    "tipos": [type_id], "es_prevision": False}
         response = self.client.post("/api/asignaciones/multiples", headers=self.admin, json=payload)
@@ -235,7 +568,7 @@ class APITests(unittest.TestCase):
         self.assertIsNone(projects[unlimited])
 
     def test_remaining_days_are_shared_and_safe_under_concurrency(self):
-        project_id = self.client.post("/api/proyectos", headers=self.admin, json={"restantes": 1}).json["proyecto_id"]
+        project_id = self.client.post("/api/proyectos", headers=self.admin, json={"restantes": 1, "activo": True}).json["proyecto_id"]
         self.create_user("other")
         other = self.login("other", "password123")
 
@@ -253,11 +586,11 @@ class APITests(unittest.TestCase):
 
     def test_multiple_assignments(self):
         project_ids = [
-            self.client.post("/api/proyectos", headers=self.admin, json={"nombre": name}).json["proyecto_id"]
+            self.client.post("/api/proyectos", headers=self.admin, json={"nombre": name, "activo": True}).json["proyecto_id"]
             for name in ("Uno", "Dos")
         ]
         type_ids = [
-            self.client.post("/api/tipos-fecha", headers=self.admin, json={"en_borde": border}).json["tipo_id"]
+            self.client.post("/api/tipos-fecha", headers=self.admin, json={"en_borde": border, "activo": True}).json["tipo_id"]
             for border in (True, False)
         ]
         payload = {
@@ -289,9 +622,9 @@ class APITests(unittest.TestCase):
                 self.assertEqual(self.client.post("/api/asignaciones/multiples", headers=self.admin, json=invalid).status_code, 400)
 
     def test_multiple_assignments_roll_back_on_conflict(self):
-        project_id = self.client.post("/api/proyectos", headers=self.admin, json={"nombre": "Proyecto", "restantes": 5}).json["proyecto_id"]
-        type_id = self.client.post("/api/tipos-fecha", headers=self.admin, json={"en_borde": True}).json["tipo_id"]
-        existing_type = self.client.post("/api/tipos-fecha", headers=self.admin, json={"en_borde": True}).json["tipo_id"]
+        project_id = self.client.post("/api/proyectos", headers=self.admin, json={"nombre": "Proyecto", "restantes": 5, "activo": True}).json["proyecto_id"]
+        type_id = self.client.post("/api/tipos-fecha", headers=self.admin, json={"en_borde": True, "activo": True}).json["tipo_id"]
+        existing_type = self.client.post("/api/tipos-fecha", headers=self.admin, json={"en_borde": True, "activo": True}).json["tipo_id"]
         payload = {
             "fechas": ["2026-02-01", "2026-02-02"],
             "proyectos": [project_id],
@@ -322,7 +655,7 @@ class APITests(unittest.TestCase):
 
     def test_multiple_assignments_serialize_with_single_typing(self):
         ids = [
-            self.client.post("/api/tipos-fecha", headers=self.admin, json={"en_borde": True}).json["tipo_id"]
+            self.client.post("/api/tipos-fecha", headers=self.admin, json={"en_borde": True, "activo": True}).json["tipo_id"]
             for _ in range(2)
         ]
         def assign(bulk):
@@ -340,7 +673,7 @@ class APITests(unittest.TestCase):
     def test_typing_rules_and_type_changes(self):
         def create_type(border):
             response = self.client.post(
-                "/api/tipos-fecha", headers=self.admin, json={"en_borde": border, "color": "#aAbBcC"}
+                "/api/tipos-fecha", headers=self.admin, json={"en_borde": border, "color": "#aAbBcC", "activo": True}
             )
             self.assertEqual(response.status_code, 201, response.json)
             return response.json["tipo_id"]
@@ -366,7 +699,7 @@ class APITests(unittest.TestCase):
     def test_concurrent_typings_cannot_repeat_border(self):
         ids = []
         for _ in range(2):
-            response = self.client.post("/api/tipos-fecha", headers=self.admin, json={"en_borde": True})
+            response = self.client.post("/api/tipos-fecha", headers=self.admin, json={"en_borde": True, "activo": True})
             ids.append(response.json["tipo_id"])
 
         def assign(type_id):
@@ -420,7 +753,7 @@ class APITests(unittest.TestCase):
         )
 
     def test_project_laborable(self):
-        created = self.client.post("/api/proyectos", headers=self.admin, json={"nombre": "Trabajo"})
+        created = self.client.post("/api/proyectos", headers=self.admin, json={"nombre": "Trabajo", "activo": True})
         self.assertEqual(created.status_code, 201, created.json)
         self.assertIs(created.json["laborable"], True)
         project_id = created.json["proyecto_id"]
@@ -444,6 +777,107 @@ class APITests(unittest.TestCase):
                     self.client.patch(f"/api/proyectos/{project_id}", headers=self.admin, json={"laborable": invalid}).status_code,
                     400,
                 )
+
+    def test_inactive_catalogs_block_new_assignments_but_preserve_history(self):
+        project = self.client.post("/api/proyectos", headers=self.admin, json={"nombre": "Trabajo"}).json
+        kind = self.client.post("/api/tipos-fecha", headers=self.admin, json={
+            "nombre": "Especial", "en_borde": True,
+        }).json
+        project_id, type_id = project["proyecto_id"], kind["tipo_id"]
+        self.assertIs(project["activo"], False)
+        self.assertIs(kind["activo"], False)
+        assignment = {"fecha": "2026-03-02", "proyecto_id": project_id, "es_prevision": True}
+        typing = {"fecha": "2026-03-02", "tipo_id": type_id}
+        self.assertEqual(self.client.post("/api/asignaciones", headers=self.admin, json=assignment).status_code, 409)
+        self.assertEqual(self.client.post("/api/tipados", headers=self.admin, json=typing).status_code, 409)
+        for path in (f"/api/proyectos/{project_id}", f"/api/tipos-fecha/{type_id}"):
+            for value in (None, 0, "true"):
+                self.assertEqual(self.client.patch(path, headers=self.admin, json={"activo": value}).status_code, 400)
+            self.assertEqual(self.client.patch(path, headers=self.admin, json={"activo": True}).status_code, 200)
+        self.assertEqual(self.client.post("/api/asignaciones", headers=self.admin, json=assignment).status_code, 201)
+        self.assertEqual(self.client.post("/api/tipados", headers=self.admin, json=typing).status_code, 201)
+        self.client.patch(f"/api/proyectos/{project_id}", headers=self.admin, json={"activo": False})
+        self.client.patch(f"/api/tipos-fecha/{type_id}", headers=self.admin, json={"activo": False})
+        bulk = {"fechas": ["2026-03-03", "2026-03-04"], "proyectos": [project_id],
+                "tipos": [type_id], "es_prevision": False}
+        project_conflict = self.client.post("/api/asignaciones/multiples", headers=self.admin, json={**bulk, "tipos": []})
+        self.assertEqual(project_conflict.status_code, 409)
+        self.assertIn("proyectos activos", project_conflict.json["error"])
+        self.client.patch(f"/api/proyectos/{project_id}", headers=self.admin, json={"activo": True})
+        type_conflict = self.client.post("/api/asignaciones/multiples", headers=self.admin, json=bulk)
+        self.assertEqual(type_conflict.status_code, 409)
+        self.assertIn("tipos de fecha activos", type_conflict.json["error"])
+        calendar = self.client.get("/api/calendario/2026", headers=self.admin).json
+        self.assertEqual(len(calendar["asignaciones"]), 1)
+        self.assertEqual(len(calendar["tipados"]), 1)
+        self.client.patch(f"/api/proyectos/{project_id}", headers=self.admin, json={"activo": False})
+        self.assertEqual(self.client.post(
+            f"/api/asignaciones/2026-03-02/{project_id}/confirmar", headers=self.admin
+        ).status_code, 200)
+        self.assertEqual(self.client.delete(
+            f"/api/asignaciones/2026-03-02/{project_id}/false", headers=self.admin
+        ).status_code, 204)
+        self.assertEqual(self.client.delete(f"/api/tipados/2026-03-02/{type_id}", headers=self.admin).status_code, 204)
+
+    def test_active_catalog_migration_preserves_existing_rows_as_inactive(self):
+        with psycopg.connect(self.url, autocommit=True) as db:
+            db.execute("ALTER TABLE proyectos DROP COLUMN activo")
+            db.execute("ALTER TABLE tipos_fecha DROP COLUMN activo")
+            db.execute((ROOT / "DB/07_activo_catalogos.sql").read_text())
+            self.assertEqual(db.execute("SELECT activo FROM proyectos WHERE nombre = 'Vacaciones'").fetchone(), (False,))
+            self.assertEqual(db.execute("SELECT activo FROM tipos_fecha WHERE nombre = 'Festivo'").fetchone(), (False,))
+            self.assertEqual(db.execute("INSERT INTO proyectos DEFAULT VALUES RETURNING activo").fetchone(), (False,))
+            self.assertEqual(db.execute("INSERT INTO tipos_fecha DEFAULT VALUES RETURNING activo").fetchone(), (False,))
+
+    def test_csv_import_preserves_inactive_history_and_supports_legacy_files(self):
+        self.create_user("other")
+        self.create_user("legacy")
+        other = self.login("other", "password123")
+        legacy = self.login("legacy", "password123")
+        project_id = self.client.post("/api/proyectos", headers=self.admin, json={
+            "nombre": "Trabajo", "activo": True,
+        }).json["proyecto_id"]
+        type_id = self.client.post("/api/tipos-fecha", headers=self.admin, json={
+            "nombre": "Especial", "en_borde": True, "activo": True,
+        }).json["tipo_id"]
+        self.assertEqual(self.client.post("/api/asignaciones", headers=self.admin, json={
+            "fecha": "2026-04-03", "proyecto_id": project_id, "es_prevision": True,
+        }).status_code, 201)
+        self.assertEqual(self.client.post("/api/tipados", headers=self.admin, json={
+            "fecha": "2026-04-03", "tipo_id": type_id,
+        }).status_code, 201)
+        exported = self.client.get("/api/calendario/2026/exportar", headers=self.admin)
+        rows = list(csv.DictReader(io.StringIO(exported.data.decode(), newline="")))
+        self.assertEqual([row["activo"] for row in rows if row["tipo"] in ("proyecto", "tipo_fecha")], ["true", "true"])
+        self.client.patch(f"/api/proyectos/{project_id}", headers=self.admin, json={"activo": False})
+        self.client.patch(f"/api/tipos-fecha/{type_id}", headers=self.admin, json={"activo": False})
+        self.assertEqual(self.client.post("/api/calendario/importar", headers=other, data=exported.data).status_code, 201)
+        self.assertFalse(next(p for p in self.client.get("/api/proyectos", headers=other).json
+                              if p["proyecto_id"] == project_id)["activo"])
+        output = io.StringIO(newline="")
+        writer = csv.DictWriter(output, fieldnames=[key for key in rows[0] if key != "activo"],
+                                extrasaction="ignore", lineterminator="\r\n")
+        writer.writeheader()
+        writer.writerows(rows)
+        response = self.client.post("/api/calendario/importar", headers=legacy, data=output.getvalue().encode())
+        self.assertEqual(response.status_code, 201, response.json)
+        calendar = self.client.get("/api/calendario/2026", headers=legacy).json
+        self.assertEqual((len(calendar["asignaciones"]), len(calendar["tipados"])), (1, 1))
+        self.create_user("new-catalog")
+        new_catalog = self.login("new-catalog", "password123")
+        for row in rows:
+            if row["tipo"] in ("proyecto", "tipo_fecha"):
+                row["nombre"] += " importado"
+        output = io.StringIO(newline="")
+        writer = csv.DictWriter(output, fieldnames=rows[0].keys(), lineterminator="\r\n")
+        writer.writeheader()
+        writer.writerows(rows)
+        response = self.client.post("/api/calendario/importar", headers=new_catalog, data=output.getvalue().encode())
+        self.assertEqual(response.status_code, 201, response.json)
+        self.assertTrue(next(p for p in self.client.get("/api/proyectos", headers=new_catalog).json
+                             if p["nombre"] == "Trabajo importado")["activo"])
+        self.assertTrue(next(t for t in self.client.get("/api/tipos-fecha", headers=new_catalog).json
+                             if t["nombre"] == "Especial importado")["activo"])
 
     def test_creation_schema_enforces_calendar_constraints(self):
         with psycopg.connect(self.url, autocommit=True) as db:
@@ -474,6 +908,8 @@ class APITests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         kind_id, nombre, description, color, border = rows[0]
         self.assertEqual((nombre, description, color, border), ("Festivo", "Día festivo", "#FF0000", False))
+        self.assertFalse(next(kind for kind in self.client.get("/api/tipos-fecha", headers=self.admin).json
+                              if kind["tipo_id"] == kind_id)["activo"])
         self.assertEqual(self.client.post("/api/new_year", json={"year": 2026}).status_code, 401)
         response = self.client.post("/api/new_year", headers=self.admin, json={"year": 2026})
         self.assertEqual(response.status_code, 201, response.json)
@@ -501,7 +937,7 @@ class APITests(unittest.TestCase):
                     if (first + timedelta(days=offset)).weekday() >= 5}
         self.assertEqual(set(dates), expected)
         self.assertEqual(len(dates), len(expected))
-        inside = self.client.post("/api/tipos-fecha", headers=self.admin, json={"en_borde": False}).json["tipo_id"]
+        inside = self.client.post("/api/tipos-fecha", headers=self.admin, json={"en_borde": False, "activo": True}).json["tipo_id"]
         self.assertEqual(self.client.post("/api/tipados", headers=self.admin, json={
             "fecha": "2029-01-06", "tipo_id": inside
         }).status_code, 201)
@@ -516,6 +952,8 @@ class APITests(unittest.TestCase):
                            if p["nombre"] == "Vacaciones")
         holiday_id = next(t["tipo_id"] for t in self.client.get("/api/tipos-fecha", headers=self.admin).json
                           if t["nombre"] == "Festivo")
+        self.client.patch(f"/api/proyectos/{vacation_id}", headers=self.admin, json={"activo": True})
+        self.client.patch(f"/api/tipos-fecha/{holiday_id}", headers=self.admin, json={"activo": True})
         for day in ("2025-12-31", "2027-01-01"):
             self.assertEqual(self.client.post("/api/tipados", headers=self.admin,
                                               json={"fecha": day, "tipo_id": holiday_id}).status_code, 201)
@@ -569,7 +1007,7 @@ class APITests(unittest.TestCase):
         other = self.login("other", "password123")
         self.assertEqual(self.client.get("/api/get_years").status_code, 401)
         self.assertEqual(self.client.get("/api/get_years", headers=self.admin).json, {"years": []})
-        project = self.client.post("/api/proyectos", headers=self.admin, json={"nombre": "Proyecto"})
+        project = self.client.post("/api/proyectos", headers=self.admin, json={"nombre": "Proyecto", "activo": True})
         project_id = project.json["proyecto_id"]
         for year in (2028, 2025):
             response = self.client.post("/api/asignaciones", headers=self.admin, json={
@@ -582,8 +1020,8 @@ class APITests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/get_years", headers=other).json, {"years": [2030]})
 
     def test_new_year_respects_typing_conflicts(self):
-        border = self.client.post("/api/tipos-fecha", headers=self.admin, json={"en_borde": True}).json["tipo_id"]
-        inside = self.client.post("/api/tipos-fecha", headers=self.admin, json={"en_borde": False}).json["tipo_id"]
+        border = self.client.post("/api/tipos-fecha", headers=self.admin, json={"en_borde": True, "activo": True}).json["tipo_id"]
+        inside = self.client.post("/api/tipos-fecha", headers=self.admin, json={"en_borde": False, "activo": True}).json["tipo_id"]
         for kind_id, day in ((border, "2026-01-01"), (inside, "2027-01-01")):
             self.assertEqual(self.client.post(
                 "/api/tipados", headers=self.admin, json={"fecha": day, "tipo_id": kind_id},
@@ -596,7 +1034,7 @@ class APITests(unittest.TestCase):
         self.assertEqual(self.client.post("/api/new_year", headers=self.admin, json={"year": 2028}).status_code, 409)
 
     def test_new_year_concurrent_with_typing(self):
-        kind = self.client.post("/api/tipos-fecha", headers=self.admin, json={"en_borde": False}).json["tipo_id"]
+        kind = self.client.post("/api/tipos-fecha", headers=self.admin, json={"en_borde": False, "activo": True}).json["tipo_id"]
         def assign(path, payload):
             with self.app.test_client() as client:
                 return client.post(path, headers=self.admin, json=payload).status_code
@@ -615,7 +1053,7 @@ class APITests(unittest.TestCase):
         users = self.client.get("/api/usuarios", headers=self.admin).json
         self.assertEqual(len(users), 2)
         self.assertNotIn("password_hash", users[0])
-        project = self.client.post("/api/proyectos", headers=self.admin, json={"nombre": "Trabajo", "color": "#123456"}).json
+        project = self.client.post("/api/proyectos", headers=self.admin, json={"nombre": "Trabajo", "color": "#123456", "activo": True}).json
         self.assertEqual(self.client.get("/api/proyectos", headers=other).json[0]["nombre"], "Trabajo")
         self.assertEqual(self.client.get("/api/tipos-fecha", headers=other).json[0]["nombre"], "Festivo")
         self.assertEqual(self.client.post("/api/new_year", headers=other, json={"year": 2026}).status_code, 201)

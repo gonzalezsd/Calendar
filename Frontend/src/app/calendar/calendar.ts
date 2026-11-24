@@ -1,7 +1,7 @@
 import { Component, DoCheck, ElementRef, HostListener, ViewChild } from '@angular/core';
 import { FormsModule, NgForm } from '@angular/forms';
 import { AppState } from '../core/app-state';
-import { Assignment, DateType, Day, Month, Project, Typing, VacationColor } from '../core/models';
+import { Assignment, DateType, Day, Month, Project, Reminder, Typing, VacationColor } from '../core/models';
 
 @Component({
   selector: 'app-calendar',
@@ -16,6 +16,9 @@ export class CalendarComponent implements DoCheck {
   bulkAssignOpen = false;
   selectedDay: Day | null = null;
   noteDraft = '';
+  reminderText = '';
+  reminderTime = '';
+  reminderRepeat = false;
   readonly selectedDates = new Set<string>();
   private selectionYear: number | null;
   projects: Project[] = [];
@@ -86,6 +89,7 @@ export class CalendarComponent implements DoCheck {
     this.selectedDates.add(day.date);
     this.selectedDay = day;
     this.noteDraft = day.note ?? '';
+    this.resetReminderDraft();
     this.selectedProjectId = null;
     this.selectedTypeId = null;
     this.forecast = false;
@@ -102,6 +106,14 @@ export class CalendarComponent implements DoCheck {
       ]);
       this.catalogsLoaded = true;
     });
+  }
+
+  get activeProjects(): Project[] {
+    return this.projects.filter(project => project.activo);
+  }
+
+  get activeDateTypes(): DateType[] {
+    return this.dateTypes.filter(type => type.activo);
   }
 
   async openAnnualInfo(): Promise<void> {
@@ -182,8 +194,7 @@ export class CalendarComponent implements DoCheck {
       if (this.selectedMonth !== null && index !== this.selectedMonth) continue;
       for (const day of month.days) {
         if (!day) continue;
-        if (!day.typings.some(type => type.nombre === 'Festivo') &&
-            !day.assignments.some(project => project.nombre === 'Vacaciones')) workingDays++;
+        if (day.assignments.some(project => project.laborable)) workingDays++;
         if (this.isWorkedDay(day)) workedDays++;
         for (const id of new Set(day.assignments.map(project => project.proyecto_id))) {
           projectDays.set(id, (projectDays.get(id) ?? 0) + 1);
@@ -200,11 +211,12 @@ export class CalendarComponent implements DoCheck {
     return {
       workingDays,
       workedDays,
-      projects: this.projects.map(project => ({
+      projects: this.projects.filter(project => projectDays.has(project.proyecto_id)).map(project => ({
         ...project, days: projectDays.get(project.proyecto_id) ?? 0,
         workedDays: projectWorkedDays.get(project.proyecto_id) ?? 0
       })),
-      types: this.dateTypes.map(type => ({ ...type, days: typeDays.get(type.tipo_id) ?? 0 }))
+      types: this.dateTypes.filter(type => typeDays.has(type.tipo_id))
+        .map(type => ({ ...type, days: typeDays.get(type.tipo_id) ?? 0 }))
     };
   }
 
@@ -228,7 +240,14 @@ export class CalendarComponent implements DoCheck {
     if (date) this.selectedDates.delete(date);
     this.selectedDay = null;
     this.noteDraft = '';
+    this.resetReminderDraft();
     return date;
+  }
+
+  private resetReminderDraft(): void {
+    this.reminderText = '';
+    this.reminderTime = '';
+    this.reminderRepeat = false;
   }
 
   get noteDirty(): boolean {
@@ -236,12 +255,16 @@ export class CalendarComponent implements DoCheck {
   }
 
   canLeaveDay(): boolean {
+    const reminderDirty = !!this.selectedDay && (!!this.reminderText || !!this.reminderTime || this.reminderRepeat);
+    if (reminderDirty) return window.confirm('Hay cambios sin guardar en la nota o el recordatorio. ¿Descartarlos?');
     return !this.noteDirty || window.confirm('Hay cambios en la nota sin guardar. ¿Descartarlos?');
   }
 
   @HostListener('window:beforeunload', ['$event'])
   beforeUnload(event: BeforeUnloadEvent): void {
-    if (this.noteDirty) event.preventDefault();
+    if (this.noteDirty || (this.selectedDay && (this.reminderText || this.reminderTime || this.reminderRepeat))) {
+      event.preventDefault();
+    }
   }
 
   openItem(view: 'proyectos' | 'tipos', id: number): void {
@@ -267,15 +290,31 @@ export class CalendarComponent implements DoCheck {
     });
   }
 
+  hasDailyReminder(day: Day): boolean {
+    return day.reminders.some(reminder => reminder.hora === null);
+  }
+
+  async addReminder(day: Day): Promise<void> {
+    if (!this.reminderText.trim()) return;
+    await this.state.run(async () => {
+      const reminder = await this.state.request<Reminder>('POST', '/api/recordatorios', {
+        fecha: day.date, hora: this.reminderTime || null, texto: this.reminderText, repetir: this.reminderRepeat
+      });
+      day.reminders.push(reminder);
+      this.resetReminderDraft();
+      this.state.message = 'Recordatorio guardado.';
+    });
+  }
+
   canAddProject(day: Day): boolean {
-    return this.selectedProjectId !== null && !day.assignments.some(
+    return this.projects.some(project => project.proyecto_id === this.selectedProjectId && project.activo) && !day.assignments.some(
       item => item.proyecto_id === this.selectedProjectId && item.es_prevision === this.forecast
     );
   }
 
   canAddType(day: Day): boolean {
     const type = this.dateTypes.find(item => item.tipo_id === this.selectedTypeId);
-    return !!type && type.en_borde !== null &&
+    return !!type && type.activo && type.en_borde !== null &&
       !day.typings.some(item => item.en_borde === null || item.en_borde === type.en_borde);
   }
 

@@ -87,9 +87,16 @@ usuario impide su uso. No son tokens JWT.
 | `DELETE /api/tipados/{fecha}/{tipo_id}` | Elimina el tipado del usuario autenticado |
 | `PUT /api/notas/{fecha}` | `{"texto": "..."}`; crea o actualiza la nota del usuario para esa fecha |
 | `DELETE /api/notas/{fecha}` | Elimina la nota del usuario para esa fecha |
+| `POST /api/recordatorios` | `fecha`, `hora` opcional (`HH:MM` o `null`), `texto`, `repetir` |
+| `GET /api/recordatorios/recurrentes` | Lista las series anuales del usuario, con `mes`, `dia`, `hora`, `texto` y `repetir` |
+| `PATCH /api/recordatorios/{recordatorio_id}` | Actualiza una serie anual: `mes`, `dia`, `hora`, `texto` y `repetir` |
+| `GET /api/recordatorios/{fecha}` | Lista los recordatorios del usuario para la fecha |
 | `GET /api/get_years` | Devuelve `{"years": [2025, 2026]}` con los años del usuario autenticado, sin duplicados y ordenados |
-| `GET /api/calendario/{year}` | Asignaciones, tipados y notas del usuario para el año, y `contexto_vacaciones` de los días adyacentes fuera del año |
-| `POST /api/new_year` | `{"year": 2026}`; tipa como `Festivo` el 1 de enero y todos los sábados y domingos del usuario |
+| `GET /api/calendario/{year}` | Asignaciones, tipados, notas y recordatorios del usuario para el año, y `contexto_vacaciones` de los días adyacentes fuera del año |
+| `GET /api/calendario/{year}/exportar` | Descarga el calendario del usuario y año en CSV UTF-8 |
+| `GET /api/calendario/exportar` | Descarga todos los años del usuario en un único CSV UTF-8 |
+| `POST /api/calendario/importar` | Recibe el CSV en el cuerpo y lo combina con el calendario del usuario |
+| `POST /api/new_year` | `{"year": 2026}`; tipa como `Festivo` el 1 de enero y todos los sábados y domingos, y copia los recordatorios repetidos del usuario |
 
 Solo los administradores pueden crear o modificar usuarios. Los demás cambios
 puede hacerlos cualquier usuario activo. En las creaciones de usuario,
@@ -99,11 +106,64 @@ y `es_administrador` en `false` si se omiten. Las contraseñas deben tener entre
 
 Los proyectos tienen un campo booleano `laborable`, que por defecto es `true`.
 También se incluye en las asignaciones devueltas por el calendario.
+Los proyectos y tipos de fecha tienen `activo` booleano, `false` por defecto.
+Solo los activos admiten nuevas asignaciones individuales o múltiples. Las
+asignaciones existentes siguen visibles y se pueden eliminar; también se pueden
+confirmar previsiones de proyectos inactivos. Crear un año sigue asignando
+automáticamente `Festivo` aunque esté inactivo.
 Las notas son privadas y hay como máximo una por usuario y fecha. Su texto debe
 contener algún carácter distinto de espacios y no puede contener caracteres
 nulos; se conserva el texto introducido. `PUT` devuelve la nota con código 200.
 `DELETE` devuelve 404 si no existe. Los años con notas también aparecen en
 `get_years`.
+
+Los recordatorios son privados y se admiten varios por fecha. El texto debe
+contener algún carácter distinto de espacios y no puede contener caracteres
+nulos. Al crear un año se copian los recordatorios con `repetir=true` de todos
+los años del usuario. No se crea una copia si ya existe en el año de destino
+un recordatorio con la misma fecha, hora y texto. El 29 de febrero se copia al
+28 en años no bisiestos, pero mantiene su fecha original para años posteriores.
+Los años con recordatorios también aparecen en `get_years`.
+La edición anual identifica una serie por usuario, día y mes originales, hora
+y texto; las repeticiones idénticas se muestran agrupadas. Los cambios se aplican
+a todas sus ocurrencias existentes y a las que se generen posteriormente, con
+el ajuste del 29 de febrero. Desactivar `repetir` conserva las ocurrencias
+existentes, pero deja de copiarlas. La API devuelve 409 si la serie editada
+coincidiría con otra serie anual existente.
+
+### Intercambio CSV
+
+El CSV incluye únicamente las asignaciones, tipados, notas y recordatorios del
+usuario y del año seleccionado o de todos sus años, junto con los datos de los
+proyectos y tipos referenciados. No contiene usuarios ni credenciales. Al
+importar se usan las fechas del archivo y siempre se escribe en el calendario
+del usuario autenticado.
+La respuesta de importación incluye `year` para un archivo anual o `years`
+para uno de varios años, además de los totales importados.
+La importación es atómica: las asignaciones y notas duplicadas, los
+recordatorios existentes con la misma fecha, hora y texto, los tipos
+incompatibles o los catálogos ambiguos o diferentes provocan un error sin
+modificar datos. Se buscan proyectos y tipos por nombre, incluido `null`; si
+hay varios con el mismo nombre no se puede resolver la referencia. Los
+catálogos existentes no se modifican salvo por el descuento de los días
+restantes de proyectos existentes por nuevas asignaciones confirmadas. Los
+proyectos nuevos conservan los días restantes del archivo. Si no hay saldo
+suficiente, se cancela toda la importación.
+La importación permite restaurar asignaciones de catálogos inactivos. Para
+catálogos existentes conserva su estado `activo`; para nuevos usa el del CSV,
+o `false` si el archivo antiguo no contiene esa columna.
+
+El archivo tiene cabecera `tipo,ref,fecha,fecha_original,nombre,descripcion,duracion,restantes,color,laborable,en_borde,es_prevision,hora,texto,repetir,version,anio,activo`.
+También se aceptan los CSV anteriores sin la columna `activo`.
+La primera fila, `calendario`, indica `version=1` y el año para una exportación
+anual, o `version=2` y `anio=\N` para todos los años. Las demás filas
+son `proyecto`, `tipo_fecha`, `asignacion`, `tipado`, `nota` o `recordatorio`;
+`ref` enlaza asignaciones y tipados con sus catálogos dentro del archivo.
+Se usa `\N` para `null`, y una barra invertida inicial se duplica para
+distinguirla de ese marcador. Los valores booleanos son `true` o `false`.
+Las cadenas que comienzan con apóstrofo o pueden interpretarse como fórmulas
+se exportan con un apóstrofo adicional, que se retira al importar; evita editar
+el archivo con herramientas que alteren este escape.
 
 Las fechas usan `AAAA-MM-DD`; los colores, `#RRGGBB`. Cada usuario puede asignar
 varios proyectos a una fecha, pero no repetir la misma combinación de fecha,

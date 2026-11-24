@@ -9,6 +9,7 @@ import { CalendarComponent } from './calendar/calendar';
 import { ProjectsComponent } from './projects/projects';
 import { UsersComponent } from './users/users';
 import { DateTypesComponent } from './date-types/date-types';
+import { Reminder } from './core/models';
 
 describe('Calendar application', () => {
   let http: HttpTestingController;
@@ -29,7 +30,10 @@ describe('Calendar application', () => {
     localStorage.removeItem('calendar_expiry');
   });
 
-  function login(fixture: ComponentFixture<App>): void {
+  function login(
+    fixture: ComponentFixture<App>, reminders: Reminder[] = [], years: number[] = [2025, 2026],
+    expectedYear = 2026
+  ): void {
     const loginComponent: LoginComponent = fixture.debugElement.query(By.directive(LoginComponent)).componentInstance;
     loginComponent.loginName = 'admin';
     loginComponent.loginPassword = 'password123';
@@ -40,15 +44,19 @@ describe('Calendar application', () => {
     expect(me.request.headers.get('Authorization')).toBe('Bearer token');
     me.flush({ usuario_id: 1, activo: true, es_administrador: true });
     flushMicrotasks();
-    http.expectOne('/api/get_years').flush({ years: [2025, 2026] });
+    http.expectOne('/api/get_years').flush({ years });
     flushMicrotasks();
-    http.expectOne('/api/calendario/2026').flush({
-      notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [{ fecha: '2026-03-01', proyecto_id: 1, nombre: 'Trabajo', color: '#123456', es_prevision: false }],
+    http.expectOne(`/api/calendario/${expectedYear}`).flush({
+      recordatorios: [], notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [{ fecha: '2026-03-01', proyecto_id: 1, nombre: 'Trabajo', color: '#123456', laborable: true, es_prevision: false }],
       tipados: [
         { fecha: '2026-01-01', tipo_id: 1, nombre: 'Festivo', color: '#FF0000', en_borde: false },
         { fecha: '2026-01-02', tipo_id: 2, nombre: 'Especial', color: '#00AA00', en_borde: true }
       ]
     });
+    flushMicrotasks();
+    const now = new Date();
+    const today = `${String(now.getFullYear()).padStart(4, '0')}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    http.expectOne(`/api/recordatorios/${today}`).flush(reminders);
     flushMicrotasks();
   }
 
@@ -59,6 +67,122 @@ describe('Calendar application', () => {
     context.fillRect(0, 0, 1, 1);
     return Array.from(context.getImageData(0, 0, 1, 1).data).slice(0, 3);
   }
+
+  it('shows all reminders for today in a dismissible dialog after login', fakeAsync(() => {
+    const fixture = TestBed.createComponent(App);
+    fixture.detectChanges();
+    login(fixture, [
+      { recordatorio_id: 1, fecha: '2026-01-03', hora: null, texto: 'Todo el día', repetir: true },
+      { recordatorio_id: 2, fecha: '2026-01-03', hora: '09:30', texto: 'Cita <b>literal</b>', repetir: false }
+    ]);
+    fixture.detectChanges();
+    const dialog = fixture.nativeElement.querySelector('dialog') as HTMLDialogElement;
+    expect(dialog.open).toBeTrue();
+    expect(dialog.textContent).toContain('Recordatorios de hoy');
+    expect(dialog.textContent).toContain('Todo el día');
+    expect(dialog.textContent).toContain('09:30');
+    expect(dialog.textContent).toContain('Cita <b>literal</b>');
+    expect(dialog.querySelector('b')).toBeNull();
+    dialog.querySelector<HTMLButtonElement>('button')!.click();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('dialog')).toBeNull();
+    fixture.componentInstance.state.logout();
+  }));
+
+  it('creates reminders and shows only all-day reminder text in the calendar preview', fakeAsync(() => {
+    const fixture = TestBed.createComponent(App);
+    fixture.detectChanges();
+    login(fixture);
+    fixture.detectChanges();
+    const root: HTMLElement = fixture.nativeElement;
+    const day = () => root.querySelector<HTMLButtonElement>('.day[aria-label="2026-01-03"]')!;
+    day().click();
+    http.expectOne('/api/proyectos').flush([]);
+    http.expectOne('/api/tipos-fecha').flush([]);
+    flushMicrotasks();
+    fixture.detectChanges();
+    expect(Array.from(root.querySelectorAll('.day-panel section')).map(section => section.getAttribute('aria-labelledby')))
+      .toEqual(['day-projects-title', 'day-types-title', 'day-reminders-title', 'day-note-title']);
+    const calendar: CalendarComponent = fixture.debugElement.query(By.directive(CalendarComponent)).componentInstance;
+    calendar.reminderText = 'Diario\n<literal>';
+    calendar.reminderRepeat = true;
+    fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('[aria-labelledby="day-reminders-title"] button')!.click();
+    const request = http.expectOne('/api/recordatorios');
+    expect(request.request.body).toEqual({ fecha: '2026-01-03', hora: null, texto: 'Diario\n<literal>', repetir: true });
+    request.flush({ error: 'Error al guardar' }, { status: 500, statusText: 'Error' });
+    flushMicrotasks();
+    fixture.detectChanges();
+    expect(calendar.reminderText).toBe('Diario\n<literal>');
+    expect(root.querySelector('.day-panel')?.textContent).toContain('Error al guardar');
+    root.querySelector<HTMLButtonElement>('[aria-labelledby="day-reminders-title"] button')!.click();
+    http.expectOne('/api/recordatorios').flush({
+      recordatorio_id: 1, fecha: '2026-01-03', hora: null, texto: 'Diario\n<literal>', repetir: true
+    });
+    flushMicrotasks();
+    fixture.detectChanges();
+    expect(calendar.reminderText).toBe('');
+    expect(day().querySelector('.reminder-indicator')?.textContent).toBe('Recordatorio');
+    const preview = day().querySelector<HTMLElement>('.note-preview')!;
+    expect(preview.textContent).toContain('Diario\n<literal>');
+    expect(preview.querySelector('literal')).toBeNull();
+    calendar.reminderText = 'Con hora';
+    calendar.reminderTime = '11:45';
+    fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('[aria-labelledby="day-reminders-title"] button')!.click();
+    const timed = http.expectOne('/api/recordatorios');
+    expect(timed.request.body.hora).toBe('11:45');
+    timed.flush({ recordatorio_id: 2, fecha: '2026-01-03', hora: '11:45', texto: 'Con hora', repetir: false });
+    flushMicrotasks();
+    fixture.detectChanges();
+    expect(root.querySelector('[aria-labelledby="day-reminders-title"]')?.textContent).toContain('11:45');
+    expect(preview.textContent).not.toContain('Con hora');
+    day().focus();
+    expect(getComputedStyle(preview).display).toBe('block');
+    calendar.reminderText = 'Sin guardar';
+    const confirm = spyOn(window, 'confirm').and.returnValue(false);
+    root.querySelector<HTMLButtonElement>('[aria-label="Cerrar detalle del día"]')!.click();
+    expect(confirm).toHaveBeenCalled();
+    expect(calendar.selectedDay).not.toBeNull();
+    fixture.componentInstance.state.logout();
+  }));
+
+  it('loads persisted reminders with notes and marks days that have only timed reminders', fakeAsync(() => {
+    const fixture = TestBed.createComponent(App);
+    fixture.detectChanges();
+    login(fixture);
+    const state = fixture.componentInstance.state;
+    void state.loadCalendar(2026);
+    http.expectOne('/api/calendario/2026').flush({
+      asignaciones: [], tipados: [], contexto_vacaciones: { anterior: [], posterior: [] },
+      notas: [{ fecha: '2026-01-03', texto: 'Nota existente' }],
+      recordatorios: [
+        { recordatorio_id: 1, fecha: '2026-01-03', hora: null, texto: 'Primer aviso', repetir: false },
+        { recordatorio_id: 2, fecha: '2026-01-03', hora: null, texto: 'Segundo aviso', repetir: true },
+        { recordatorio_id: 3, fecha: '2026-01-04', hora: '08:00', texto: 'Cita', repetir: false }
+      ]
+    });
+    flushMicrotasks();
+    fixture.detectChanges();
+    const root: HTMLElement = fixture.nativeElement;
+    const mixed = root.querySelector<HTMLButtonElement>('.day[aria-label="2026-01-03"]')!;
+    const preview = mixed.querySelector<HTMLElement>('.note-preview')!;
+    expect(preview.textContent).toContain('Nota existente');
+    expect(preview.textContent).toContain('Primer aviso');
+    expect(preview.textContent).toContain('Segundo aviso');
+    expect(mixed.getAttribute('aria-describedby')).toContain('reminder-indicator-2026-01-03');
+    const timed = root.querySelector<HTMLButtonElement>('.day[aria-label="2026-01-04"]')!;
+    expect(timed.querySelector('.reminder-indicator')).not.toBeNull();
+    expect(timed.querySelector('.note-preview')).toBeNull();
+    timed.click();
+    http.expectOne('/api/proyectos').flush([]);
+    http.expectOne('/api/tipos-fecha').flush([]);
+    flushMicrotasks();
+    fixture.detectChanges();
+    expect(root.querySelector('[aria-labelledby="day-reminders-title"]')?.textContent).toContain('08:00');
+    expect(root.querySelector('[aria-labelledby="day-reminders-title"]')?.textContent).toContain('Cita');
+    state.logout();
+  }));
 
   it('creates, edits and removes a private day note and its calendar marker', fakeAsync(() => {
     const fixture = TestBed.createComponent(App);
@@ -132,7 +256,7 @@ describe('Calendar application', () => {
     expect(textarea().value).toBe('');
     void fixture.componentInstance.state.loadCalendar(2026);
     http.expectOne('/api/calendario/2026').flush({
-      asignaciones: [], tipados: [], notas: [{ fecha: '2026-01-04', texto: 'Persistida <b>literal</b>' }],
+      asignaciones: [], tipados: [], recordatorios: [], notas: [{ fecha: '2026-01-04', texto: 'Persistida <b>literal</b>' }],
       contexto_vacaciones: { anterior: [], posterior: [] }
     });
     flushMicrotasks();
@@ -211,11 +335,43 @@ describe('Calendar application', () => {
     expect(getComputedStyle(borderedDay).outlineColor).toBe('rgb(0, 170, 0)');
     expect(getComputedStyle(borderedDay).outlineWidth).toBe('2px');
     void fixture.componentInstance.state.changeYear('2025');
-    http.expectOne('/api/calendario/2025').flush({ notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [] });
+    http.expectOne('/api/calendario/2025').flush({ recordatorios: [], notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [] });
     flushMicrotasks();
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('.year-title').textContent.trim()).toBe('2025');
     expect(fixture.nativeElement.textContent).not.toContain('Trabajo');
+    fixture.componentInstance.state.logout();
+  }));
+
+  it('selects the current year on login even when a later year exists', fakeAsync(() => {
+    const currentYear = new Date().getFullYear();
+    const fixture = TestBed.createComponent(App);
+    fixture.detectChanges();
+    login(fixture, [], [currentYear - 1, currentYear, currentYear + 1], currentYear);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('.year-title').textContent.trim()).toBe(String(currentYear));
+    expect(fixture.nativeElement.querySelector('.year-selector select').value).toBe(String(currentYear));
+    const select: HTMLSelectElement = fixture.nativeElement.querySelector('.year-selector select');
+    select.value = String(currentYear + 1);
+    select.dispatchEvent(new Event('change'));
+    http.expectOne(`/api/calendario/${currentYear + 1}`).flush({
+      recordatorios: [], notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: []
+    });
+    flushMicrotasks();
+    fixture.detectChanges();
+    expect(select.value).toBe(String(currentYear + 1));
+    expect(fixture.nativeElement.querySelector('.year-title').textContent.trim()).toBe(String(currentYear + 1));
+    fixture.componentInstance.state.logout();
+  }));
+
+  it('selects the most recent available year when the current year is unavailable', fakeAsync(() => {
+    const currentYear = new Date().getFullYear();
+    const fixture = TestBed.createComponent(App);
+    fixture.detectChanges();
+    login(fixture, [], [currentYear - 2, currentYear - 1], currentYear - 1);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('.year-title').textContent.trim()).toBe(String(currentYear - 1));
+    expect(fixture.nativeElement.querySelector('.year-selector select').value).toBe(String(currentYear - 1));
     fixture.componentInstance.state.logout();
   }));
 
@@ -271,7 +427,7 @@ describe('Calendar application', () => {
     const vacation = { proyecto_id: 2, nombre: 'Vacaciones', color: '#FF7800', laborable: false };
     const other = { proyecto_id: 3, nombre: 'Otro', color: '#000000', laborable: true };
     http.expectOne('/api/calendario/2024').flush({
-      notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [
+      recordatorios: [], notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [
         { ...work, fecha: '2024-01-01', es_prevision: false },
         { ...work, fecha: '2024-01-01', es_prevision: true },
         { ...other, fecha: '2024-01-01', es_prevision: false },
@@ -300,18 +456,19 @@ describe('Calendar application', () => {
     root.querySelector<HTMLButtonElement>('#annual-info-button')!.click();
     http.expectOne('/api/proyectos').flush([
       { ...work, descripcion: '', duracion: 10, restantes: 7 },
-      { ...vacation, descripcion: '', duracion: null, restantes: null },
-      { ...other, descripcion: '', duracion: 0, restantes: 0 }
+      { ...vacation, descripcion: '', duracion: null, restantes: null, activo: false },
+      { ...other, descripcion: '', duracion: 0, restantes: 0 },
+      { proyecto_id: 4, nombre: 'Proyecto sin asignar', laborable: true, activo: true }
     ]);
     http.expectOne('/api/tipos-fecha').flush([
       { tipo_id: 1, nombre: 'Festivo', color: '#FF0000', en_borde: false },
-      { tipo_id: 2, nombre: 'Especial', color: '#00AA00', en_borde: true },
+      { tipo_id: 2, nombre: 'Especial', color: '#00AA00', en_borde: true, activo: false },
       { tipo_id: 3, nombre: 'Sin asignar', color: '#000000', en_borde: true }
     ]);
     flushMicrotasks();
     fixture.detectChanges();
     const panel = () => root.querySelector<HTMLElement>('.annual-info')!;
-    expect(panel().textContent).toContain('Días laborables: 363');
+    expect(panel().textContent).toContain('Días laborables: 4');
     expect(panel().textContent).toContain('Días trabajados: 3');
     const types = panel().querySelector('[aria-labelledby="annual-types-title"]')!;
     const typeRows = types.querySelectorAll('.day-panel-item');
@@ -319,9 +476,10 @@ describe('Calendar application', () => {
     expect(typeRows[0].textContent).toContain('2 días');
     expect(typeRows[1].textContent).toContain('Especial');
     expect(typeRows[1].textContent).toContain('1 día');
-    expect(typeRows[2].textContent).toContain('Sin asignar');
-    expect(typeRows[2].textContent).toContain('0 días');
+    expect(typeRows.length).toBe(2);
     const projects = panel().querySelectorAll('.annual-project');
+    expect(projects.length).toBe(3);
+    expect(panel().textContent).not.toContain('Proyecto sin asignar');
     expect(projects[0].textContent).toContain('Duración inicial: 10');
     expect(projects[0].textContent).toContain('Días restantes: 7');
     expect(projects[0].textContent).toContain('Días asignados: 4');
@@ -334,13 +492,15 @@ describe('Calendar application', () => {
     void state.changeYear('2025');
     fixture.detectChanges();
     expect(panel().textContent).toContain('Cargando información anual');
-    http.expectOne('/api/calendario/2025').flush({ notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [] });
+    http.expectOne('/api/calendario/2025').flush({ recordatorios: [], notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [] });
     flushMicrotasks();
     fixture.detectChanges();
     expect(panel().textContent).toContain('Información anual 2025');
-    expect(panel().textContent).toContain('Días laborables: 365');
+    expect(panel().textContent).toContain('Días laborables: 0');
     expect(panel().textContent).toContain('Días trabajados: 0');
-    expect(panel().querySelector('.annual-project')?.textContent).toContain('Días asignados: 0');
+    expect(panel().querySelector('.annual-project')).toBeNull();
+    expect(panel().textContent).toContain('No hay proyectos asignados en este periodo.');
+    expect(panel().textContent).toContain('No hay tipos de fecha asignados en este periodo.');
 
     root.querySelector<HTMLButtonElement>('[aria-label="Ver Enero 2025"]')!.click();
     fixture.detectChanges();
@@ -362,10 +522,12 @@ describe('Calendar application', () => {
     void state.changeYear('2024');
     const work = { proyecto_id: 1, nombre: 'Trabajo', color: '#123456', laborable: true };
     const vacation = { proyecto_id: 2, nombre: 'Vacaciones', color: '#FF7800', laborable: false };
+    const outsideMonth = { proyecto_id: 3, nombre: 'Solo enero', color: '#000000', laborable: true };
     http.expectOne('/api/calendario/2024').flush({
-      notas: [], contexto_vacaciones: { anterior: [], posterior: [] },
+      recordatorios: [], notas: [], contexto_vacaciones: { anterior: [], posterior: [] },
       asignaciones: [
         { ...vacation, fecha: '2024-01-10', es_prevision: false },
+        { ...outsideMonth, fecha: '2024-01-10', es_prevision: false },
         { ...work, fecha: '2024-03-10', es_prevision: false },
         { ...vacation, fecha: '2024-02-02', es_prevision: true },
         { ...work, fecha: '2024-02-03', es_prevision: true },
@@ -373,7 +535,7 @@ describe('Calendar application', () => {
         { ...work, fecha: '2024-02-04', es_prevision: false }
       ],
       tipados: [
-        { fecha: '2024-01-10', tipo_id: 1, nombre: 'Festivo', color: '#FF0000', en_borde: false },
+        { fecha: '2024-01-10', tipo_id: 3, nombre: 'Solo enero', color: '#000000', en_borde: false },
         { fecha: '2024-02-01', tipo_id: 1, nombre: 'Festivo', color: '#FF0000', en_borde: false },
         { fecha: '2024-02-04', tipo_id: 2, nombre: 'Especial', color: '#00AA00', en_borde: true }
       ]
@@ -389,24 +551,27 @@ describe('Calendar application', () => {
     button.click();
     http.expectOne('/api/proyectos').flush([
       { ...work, descripcion: '', duracion: 10, restantes: 7 },
-      { ...vacation, descripcion: '', duracion: null, restantes: null }
+      { ...vacation, descripcion: '', duracion: null, restantes: null, activo: false },
+      { ...outsideMonth, descripcion: '', duracion: null, restantes: null, activo: true }
     ]);
     http.expectOne('/api/tipos-fecha').flush([
       { tipo_id: 1, nombre: 'Festivo', color: '#FF0000', en_borde: false },
-      { tipo_id: 2, nombre: 'Especial', color: '#00AA00', en_borde: true },
-      { tipo_id: 3, nombre: 'Sin asignar', color: '#000000', en_borde: true }
+      { tipo_id: 2, nombre: 'Especial', color: '#00AA00', en_borde: true, activo: false },
+      { tipo_id: 3, nombre: 'Solo enero', color: '#000000', en_borde: false }
     ]);
     flushMicrotasks();
     fixture.detectChanges();
     const panel = () => root.querySelector<HTMLElement>('.annual-info')!;
     expect(panel().textContent).toContain('Información mensual Febrero 2024');
-    expect(panel().textContent).toContain('Días laborables: 27');
+    expect(panel().textContent).toContain('Días laborables: 2');
     expect(panel().textContent).toContain('Días trabajados: 1');
     const types = panel().querySelectorAll('[aria-labelledby="annual-types-title"] .day-panel-item');
     expect(types[0].textContent).toContain('1 día');
     expect(types[1].textContent).toContain('1 día');
-    expect(types[2].textContent).toContain('0 días');
+    expect(types.length).toBe(2);
     const projects = panel().querySelectorAll('.annual-project');
+    expect(projects.length).toBe(2);
+    expect(panel().textContent).not.toContain('Solo enero');
     expect(projects[0].textContent).toContain('Duración inicial: 10');
     expect(projects[0].textContent).toContain('Días restantes: 7');
     expect(projects[0].textContent).toContain('Días asignados: 2');
@@ -417,12 +582,14 @@ describe('Calendar application', () => {
     void state.changeYear('2025');
     fixture.detectChanges();
     expect(panel().textContent).toContain('Cargando información mensual');
-    http.expectOne('/api/calendario/2025').flush({ notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [] });
+    http.expectOne('/api/calendario/2025').flush({ recordatorios: [], notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [] });
     flushMicrotasks();
     fixture.detectChanges();
     expect(panel().textContent).toContain('Información mensual Febrero 2025');
-    expect(panel().textContent).toContain('Días laborables: 28');
+    expect(panel().textContent).toContain('Días laborables: 0');
     expect(panel().textContent).toContain('Días trabajados: 0');
+    expect(panel().querySelectorAll('.annual-project').length).toBe(0);
+    expect(panel().querySelectorAll('[aria-labelledby="annual-types-title"] .day-panel-item').length).toBe(0);
     root.querySelector<HTMLButtonElement>('[aria-label="Cerrar información mensual"]')!.click();
     fixture.detectChanges();
     expect(document.activeElement).toBe(button);
@@ -455,7 +622,7 @@ describe('Calendar application', () => {
     http.expectOne('/api/tipos-fecha').flush([]);
     flushMicrotasks();
     fixture.detectChanges();
-    expect(root.querySelector('.annual-info')?.textContent).toContain('Días laborables: 364');
+    expect(root.querySelector('.annual-info')?.textContent).toContain('Días laborables: 1');
     root.querySelector<HTMLButtonElement>('[aria-label="Cerrar información anual"]')!.click();
     fixture.detectChanges();
     expect(root.querySelector('.annual-info')).toBeNull();
@@ -472,7 +639,7 @@ describe('Calendar application', () => {
     root.querySelector<HTMLButtonElement>('[aria-label="Ver Febrero 2026"]')!.click();
     fixture.detectChanges();
     void fixture.componentInstance.state.changeYear('2025');
-    http.expectOne('/api/calendario/2025').flush({ notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [] });
+    http.expectOne('/api/calendario/2025').flush({ recordatorios: [], notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [] });
     flushMicrotasks();
     fixture.detectChanges();
     expect(root.querySelector('.month-card')?.getAttribute('aria-label')).toBe('Febrero 2025');
@@ -490,7 +657,7 @@ describe('Calendar application', () => {
     spyOnProperty(calendar, 'todayDate', 'get').and.returnValue('2025-01-01');
     void fixture.componentInstance.state.changeYear('2025');
     http.expectOne('/api/calendario/2025').flush({
-      notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [
+      recordatorios: [], notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [
         { fecha: '2025-01-02', proyecto_id: 1, nombre: 'Trabajo', color: '#123456', es_prevision: false },
         { fecha: '2025-01-03', proyecto_id: 1, nombre: 'Trabajo', color: '#123456', es_prevision: false },
         { fecha: '2025-01-03', proyecto_id: 2, nombre: 'Otro', color: '#abcdef', es_prevision: true },
@@ -532,7 +699,7 @@ describe('Calendar application', () => {
     const today = spyOnProperty(calendar, 'todayDate', 'get').and.returnValue('2026-01-03');
     void fixture.componentInstance.state.loadCalendar(2026);
     http.expectOne('/api/calendario/2026').flush({
-      notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [
+      recordatorios: [], notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [
         { fecha: '2026-01-02', proyecto_id: 1, nombre: 'Trabajo', color: '#123456', laborable: true, es_prevision: false }
       ],
       tipados: [
@@ -580,7 +747,7 @@ describe('Calendar application', () => {
     };
     void fixture.componentInstance.state.loadCalendar(2026);
     http.expectOne('/api/calendario/2026').flush({
-      asignaciones: assignments, tipados: typings, notas: [], contexto_vacaciones: context
+      asignaciones: assignments, tipados: typings, recordatorios: [], notas: [], contexto_vacaciones: context
     });
     flushMicrotasks();
     fixture.detectChanges();
@@ -603,7 +770,7 @@ describe('Calendar application', () => {
     void fixture.componentInstance.state.loadCalendar(2026);
     http.expectOne('/api/calendario/2026').flush({
       asignaciones: assignments.map(item => item.fecha === '2026-01-05' ? { ...item, es_prevision: false } : item),
-      tipados: typings, notas: [], contexto_vacaciones: context
+      tipados: typings, recordatorios: [], notas: [], contexto_vacaciones: context
     });
     flushMicrotasks();
     fixture.detectChanges();
@@ -637,7 +804,7 @@ describe('Calendar application', () => {
     expect(day('2026-03-01').getAttribute('aria-pressed')).toBe('true');
 
     void fixture.componentInstance.state.loadCalendar(2026);
-    http.expectOne('/api/calendario/2026').flush({ notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [] });
+    http.expectOne('/api/calendario/2026').flush({ recordatorios: [], notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [] });
     flushMicrotasks();
     fixture.detectChanges();
     expect(day('2026-01-02').getAttribute('aria-pressed')).toBe('true');
@@ -668,11 +835,11 @@ describe('Calendar application', () => {
     expect(day('2026-01-04').getAttribute('aria-pressed')).toBe('true');
 
     void fixture.componentInstance.state.changeYear('2025');
-    http.expectOne('/api/calendario/2025').flush({ notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [] });
+    http.expectOne('/api/calendario/2025').flush({ recordatorios: [], notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [] });
     flushMicrotasks();
     fixture.detectChanges();
     void fixture.componentInstance.state.changeYear('2026');
-    http.expectOne('/api/calendario/2026').flush({ notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [] });
+    http.expectOne('/api/calendario/2026').flush({ recordatorios: [], notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [] });
     flushMicrotasks();
     fixture.detectChanges();
     expect(day('2026-01-03').getAttribute('aria-pressed')).toBe('false');
@@ -695,8 +862,8 @@ describe('Calendar application', () => {
     shiftClick('2026-02-02');
     fixture.detectChanges();
     root.querySelector<HTMLButtonElement>('#bulk-assign-button')!.click();
-    const project = { proyecto_id: 1, nombre: 'Trabajo', descripcion: '', duracion: 10, restantes: 5, color: '#123456', laborable: true };
-    const type = { tipo_id: 2, nombre: 'Especial', descripcion: '', color: '#00AA00', en_borde: true };
+    const project = { proyecto_id: 1, nombre: 'Trabajo', descripcion: '', duracion: 10, restantes: 5, color: '#123456', laborable: true, activo: true };
+    const type = { tipo_id: 2, nombre: 'Especial', descripcion: '', color: '#00AA00', en_borde: true, activo: true };
     http.expectOne('/api/proyectos').flush([project]);
     http.expectOne('/api/tipos-fecha').flush([type]);
     flushMicrotasks();
@@ -727,7 +894,7 @@ describe('Calendar application', () => {
     const tipados = ['2026-02-01', '2026-02-02'].map(fecha => ({
       fecha, tipo_id: 2, nombre: 'Especial', color: '#00AA00', en_borde: true
     }));
-    http.expectOne('/api/calendario/2026').flush({ notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones, tipados });
+    http.expectOne('/api/calendario/2026').flush({ recordatorios: [], notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones, tipados });
     flushMicrotasks();
     fixture.detectChanges();
     expect(root.querySelector('.bulk-assign')).toBeNull();
@@ -736,6 +903,67 @@ describe('Calendar application', () => {
     expect(backgroundRgb(root.querySelector('.day[aria-label="2026-02-01"]')!)).toEqual([136, 154, 171]);
     expect(getComputedStyle(root.querySelector('.day[aria-label="2026-02-02"]')!).outlineColor).toBe('rgb(0, 170, 0)');
     fixture.componentInstance.state.logout();
+  }));
+
+  it('only offers active catalogs for individual and multiple assignments while displaying history', fakeAsync(() => {
+    const fixture = TestBed.createComponent(App);
+    fixture.detectChanges();
+    login(fixture);
+    const state = fixture.componentInstance.state;
+    void state.loadCalendar(2026);
+    http.expectOne('/api/calendario/2026').flush({
+      recordatorios: [], notas: [], contexto_vacaciones: { anterior: [], posterior: [] },
+      asignaciones: [{ fecha: '2026-01-03', proyecto_id: 2, nombre: 'Proyecto inactivo',
+        color: '#123456', laborable: true, es_prevision: true }],
+      tipados: [{ fecha: '2026-01-03', tipo_id: 4, nombre: 'Tipo inactivo', color: '#123456', en_borde: false }]
+    });
+    flushMicrotasks();
+    fixture.detectChanges();
+    const projects = [
+      { proyecto_id: 1, nombre: 'Proyecto activo', activo: true, laborable: true },
+      { proyecto_id: 2, nombre: 'Proyecto inactivo', activo: false, laborable: true }
+    ];
+    const types = [
+      { tipo_id: 3, nombre: 'Tipo activo', activo: true, en_borde: true },
+      { tipo_id: 4, nombre: 'Tipo inactivo', activo: false, en_borde: false }
+    ];
+    const root: HTMLElement = fixture.nativeElement;
+    root.querySelector<HTMLButtonElement>('.day[aria-label="2026-01-03"]')!.click();
+    http.expectOne('/api/proyectos').flush(projects);
+    http.expectOne('/api/tipos-fecha').flush(types);
+    flushMicrotasks();
+    fixture.detectChanges();
+    const panel = root.querySelector<HTMLElement>('.day-panel')!;
+    expect(panel.textContent).toContain('Proyecto inactivo');
+    expect(panel.textContent).toContain('Tipo inactivo');
+    const projectOptions = panel.querySelector<HTMLElement>('[aria-labelledby="day-projects-title"] select')!;
+    const typeOptions = panel.querySelector<HTMLElement>('[aria-labelledby="day-types-title"] select')!;
+    expect(projectOptions.textContent).toContain('Proyecto activo');
+    expect(projectOptions.textContent).not.toContain('Proyecto inactivo');
+    expect(typeOptions.textContent).toContain('Tipo activo');
+    expect(typeOptions.textContent).not.toContain('Tipo inactivo');
+    const calendar: CalendarComponent = fixture.debugElement.query(By.directive(CalendarComponent)).componentInstance;
+    calendar.selectedProjectId = 2;
+    calendar.selectedTypeId = 4;
+    expect(calendar.canAddProject(calendar.selectedDay!)).toBeFalse();
+    expect(calendar.canAddType(calendar.selectedDay!)).toBeFalse();
+    panel.querySelector<HTMLButtonElement>('[aria-label="Cerrar detalle del día"]')!.click();
+    for (const date of ['2026-01-04', '2026-01-05']) {
+      root.querySelector<HTMLButtonElement>(`.day[aria-label="${date}"]`)!
+        .dispatchEvent(new MouseEvent('click', { bubbles: true, shiftKey: true }));
+    }
+    fixture.detectChanges();
+    root.querySelector<HTMLButtonElement>('#bulk-assign-button')!.click();
+    http.expectOne('/api/proyectos').flush(projects);
+    http.expectOne('/api/tipos-fecha').flush(types);
+    flushMicrotasks();
+    fixture.detectChanges();
+    const bulk = root.querySelector<HTMLElement>('.bulk-assign')!;
+    expect(bulk.textContent).toContain('Proyecto activo');
+    expect(bulk.textContent).toContain('Tipo activo');
+    expect(bulk.textContent).not.toContain('Proyecto inactivo');
+    expect(bulk.textContent).not.toContain('Tipo inactivo');
+    state.logout();
   }));
 
   it('keeps the selection and choices when a bulk assignment conflicts', fakeAsync(() => {
@@ -750,7 +978,7 @@ describe('Calendar application', () => {
     }
     fixture.detectChanges();
     root.querySelector<HTMLButtonElement>('#bulk-assign-button')!.click();
-    http.expectOne('/api/proyectos').flush([{ proyecto_id: 1, nombre: 'Trabajo', laborable: true }]);
+    http.expectOne('/api/proyectos').flush([{ proyecto_id: 1, nombre: 'Trabajo', laborable: true, activo: true }]);
     http.expectOne('/api/tipos-fecha').flush([]);
     flushMicrotasks();
     fixture.detectChanges();
@@ -782,8 +1010,8 @@ describe('Calendar application', () => {
     fixture.detectChanges();
     login(fixture);
     fixture.detectChanges();
-    const project = { proyecto_id: 1, nombre: 'Trabajo', descripcion: '', duracion: null, restantes: null, color: '#123456', laborable: true };
-    const type = { tipo_id: 2, nombre: 'Especial', descripcion: '', color: '#00AA00', en_borde: true };
+    const project = { proyecto_id: 1, nombre: 'Trabajo', descripcion: '', duracion: null, restantes: null, color: '#123456', laborable: true, activo: true };
+    const type = { tipo_id: 2, nombre: 'Especial', descripcion: '', color: '#00AA00', en_borde: true, activo: true };
     const assignment = { fecha: '2026-01-03', proyecto_id: 1, nombre: 'Trabajo', color: '#123456', laborable: true, es_prevision: true };
     const typing = { fecha: '2026-01-03', tipo_id: 2, nombre: 'Especial', color: '#00AA00', en_borde: true };
     fixture.nativeElement.querySelector('.day[aria-label="2026-01-03"]').click();
@@ -805,7 +1033,7 @@ describe('Calendar application', () => {
     expect(addProject.request.body).toEqual({ fecha: '2026-01-03', proyecto_id: 1, es_prevision: true });
     addProject.flush({}, { status: 201, statusText: 'Created' });
     flushMicrotasks();
-    http.expectOne('/api/calendario/2026').flush({ notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [assignment], tipados: [] });
+    http.expectOne('/api/calendario/2026').flush({ recordatorios: [], notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [assignment], tipados: [] });
     flushMicrotasks();
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('.day-panel').textContent).toContain('Trabajo · previsión');
@@ -818,7 +1046,7 @@ describe('Calendar application', () => {
     expect(addType.request.body).toEqual({ fecha: '2026-01-03', tipo_id: 2 });
     addType.flush({}, { status: 201, statusText: 'Created' });
     flushMicrotasks();
-    http.expectOne('/api/calendario/2026').flush({ notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [assignment], tipados: [typing] });
+    http.expectOne('/api/calendario/2026').flush({ recordatorios: [], notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [assignment], tipados: [typing] });
     flushMicrotasks();
     fixture.detectChanges();
     expect(calendar.canAddType(calendar.selectedDay!)).toBeFalse();
@@ -828,7 +1056,7 @@ describe('Calendar application', () => {
     expect(removeProject.request.method).toBe('DELETE');
     removeProject.flush(null, { status: 204, statusText: 'No Content' });
     flushMicrotasks();
-    http.expectOne('/api/calendario/2026').flush({ notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [typing] });
+    http.expectOne('/api/calendario/2026').flush({ recordatorios: [], notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [typing] });
     flushMicrotasks();
     fixture.detectChanges();
     expect(getComputedStyle(fixture.nativeElement.querySelector('.day[aria-label="2026-01-03"]')).backgroundColor)
@@ -838,7 +1066,7 @@ describe('Calendar application', () => {
     expect(removeType.request.method).toBe('DELETE');
     removeType.flush(null, { status: 204, statusText: 'No Content' });
     flushMicrotasks();
-    http.expectOne('/api/calendario/2026').flush({ notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [] });
+    http.expectOne('/api/calendario/2026').flush({ recordatorios: [], notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [] });
     flushMicrotasks();
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('.day-panel').textContent).toContain('No hay tipos asignados');
@@ -859,7 +1087,7 @@ describe('Calendar application', () => {
     const forecast = { fecha: '2026-01-03', proyecto_id: 1, nombre: 'Trabajo', color: '#123456', laborable: true, es_prevision: true };
     const confirmed = { ...forecast, es_prevision: false };
     void state.loadCalendar(2026);
-    http.expectOne('/api/calendario/2026').flush({ notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [forecast], tipados: [] });
+    http.expectOne('/api/calendario/2026').flush({ recordatorios: [], notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [forecast], tipados: [] });
     flushMicrotasks();
     fixture.detectChanges();
     const root: HTMLElement = fixture.nativeElement;
@@ -886,7 +1114,7 @@ describe('Calendar application', () => {
     expect(request.request.method).toBe('POST');
     request.flush({ ...confirmed, usuario_id: 1 });
     flushMicrotasks();
-    http.expectOne('/api/calendario/2026').flush({ notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [confirmed], tipados: [] });
+    http.expectOne('/api/calendario/2026').flush({ recordatorios: [], notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [confirmed], tipados: [] });
     flushMicrotasks();
     fixture.detectChanges();
     expect(root.querySelector('[aria-label="Confirmar previsión de Trabajo"]')).toBeNull();
@@ -894,7 +1122,7 @@ describe('Calendar application', () => {
     expect(getComputedStyle(root.querySelector('.day[aria-label="2026-01-03"]')!).backgroundColor).toBe('rgb(18, 52, 86)');
 
     void state.loadCalendar(2026);
-    http.expectOne('/api/calendario/2026').flush({ notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [confirmed, forecast], tipados: [] });
+    http.expectOne('/api/calendario/2026').flush({ recordatorios: [], notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [confirmed, forecast], tipados: [] });
     flushMicrotasks();
     fixture.detectChanges();
     root.querySelector<HTMLButtonElement>('.day[aria-label="2026-01-03"]')!.click();
@@ -905,7 +1133,7 @@ describe('Calendar application', () => {
     confirmButton().click();
     http.expectOne('/api/asignaciones/2026-01-03/1/confirmar').flush({ ...confirmed, usuario_id: 1 });
     flushMicrotasks();
-    http.expectOne('/api/calendario/2026').flush({ notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [confirmed], tipados: [] });
+    http.expectOne('/api/calendario/2026').flush({ recordatorios: [], notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [confirmed], tipados: [] });
     flushMicrotasks();
     fixture.detectChanges();
     expect(root.querySelectorAll('.day-panel-item .item-link').length).toBe(1);
@@ -961,7 +1189,7 @@ describe('Calendar application', () => {
     http.expectOne('/api/tipos-fecha').flush([]);
     flushMicrotasks();
     void fixture.componentInstance.state.changeYear('2025');
-    http.expectOne('/api/calendario/2025').flush({ notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [] });
+    http.expectOne('/api/calendario/2025').flush({ recordatorios: [], notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [] });
     flushMicrotasks();
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('.day-panel')).toBeNull();
@@ -992,7 +1220,7 @@ describe('Calendar application', () => {
     const retry = Array.from(panel.querySelectorAll('button') as NodeListOf<HTMLButtonElement>)
       .find(button => button.textContent?.includes('Reintentar actualización'))!;
     retry.click();
-    http.expectOne('/api/calendario/2026').flush({ notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [] });
+    http.expectOne('/api/calendario/2026').flush({ recordatorios: [], notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [] });
     flushMicrotasks();
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('.day-panel').textContent).toContain('Calendario actualizado');
@@ -1029,8 +1257,8 @@ describe('Calendar application', () => {
     fixture.nativeElement.querySelector('.day[aria-label="2026-01-01"]').click();
     http.expectOne('/api/proyectos').flush([]);
     http.expectOne('/api/tipos-fecha').flush([
-      { tipo_id: 3, nombre: 'Otro', descripcion: '', color: '#123456', en_borde: false },
-      { tipo_id: 4, nombre: 'Borde', descripcion: '', color: '#654321', en_borde: true }
+      { tipo_id: 3, nombre: 'Otro', descripcion: '', color: '#123456', en_borde: false, activo: true },
+      { tipo_id: 4, nombre: 'Borde', descripcion: '', color: '#654321', en_borde: true, activo: true }
     ]);
     flushMicrotasks();
     fixture.detectChanges();
@@ -1076,7 +1304,7 @@ describe('Calendar application', () => {
     flushMicrotasks();
     http.expectOne('/api/get_years').flush({ years: [2025, 2026, 2027] });
     flushMicrotasks();
-    http.expectOne('/api/calendario/2027').flush({ notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [] });
+    http.expectOne('/api/calendario/2027').flush({ recordatorios: [], notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [] });
     flushMicrotasks();
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('.year-title').textContent.trim()).toBe('2027');
@@ -1103,38 +1331,203 @@ describe('Calendar application', () => {
     fixture.detectChanges();
     const laborable = fixture.nativeElement.querySelector('input[name="laborable"]') as HTMLInputElement;
     expect(laborable.checked).toBeTrue();
+    const activeProject = fixture.nativeElement.querySelector('input[name="activo"]') as HTMLInputElement;
+    expect(activeProject.checked).toBeFalse();
     projects.projectForm.nombre = 'Proyecto A';
     void projects.saveProject({ invalid: false } as NgForm);
     const created = http.expectOne('/api/proyectos');
     expect(created.request.method).toBe('POST');
     expect(created.request.body.nombre).toBe('Proyecto A');
     expect(created.request.body.laborable).toBeTrue();
+    expect(created.request.body.activo).toBeFalse();
     created.flush({ proyecto_id: 1 });
     flushMicrotasks();
-    const project = { proyecto_id: 1, nombre: 'Proyecto A', descripcion: '', duracion: null, restantes: null, color: '#4f46e5', laborable: true };
+    const project = { proyecto_id: 1, nombre: 'Proyecto A', descripcion: '', duracion: null, restantes: null, color: '#4f46e5', laborable: true, activo: true };
     http.expectOne('/api/proyectos').flush([project]);
     flushMicrotasks();
-    http.expectOne('/api/calendario/2026').flush({ notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [] });
+    http.expectOne('/api/calendario/2026').flush({ recordatorios: [], notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [] });
     flushMicrotasks();
     projects.editProject(project);
     projects.projectForm.nombre = 'Proyecto B';
     fixture.detectChanges();
+    flushMicrotasks();
     laborable.click();
+    activeProject.click();
     expect(projects.projectForm.laborable).toBeFalse();
     void projects.saveProject({ invalid: false } as NgForm);
     const updated = http.expectOne('/api/proyectos/1');
     expect(updated.request.method).toBe('PATCH');
     expect(updated.request.body.nombre).toBe('Proyecto B');
     expect(updated.request.body.laborable).toBeFalse();
+    expect(updated.request.body.activo).toBeFalse();
     updated.flush({ ...project, nombre: 'Proyecto B', laborable: false });
     flushMicrotasks();
     http.expectOne('/api/proyectos').flush([{ ...project, nombre: 'Proyecto B', laborable: false }]);
     flushMicrotasks();
-    http.expectOne('/api/calendario/2026').flush({ notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [] });
+    http.expectOne('/api/calendario/2026').flush({ recordatorios: [], notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [] });
     flushMicrotasks();
     fixture.detectChanges();
     expect(fixture.nativeElement.textContent).toContain('Proyecto B');
     app.state.logout();
+  }));
+
+  it('edits annually recurring reminders from settings and refreshes the calendar', fakeAsync(() => {
+    const fixture = TestBed.createComponent(App);
+    fixture.detectChanges();
+    login(fixture);
+    fixture.detectChanges();
+    const root: HTMLElement = fixture.nativeElement;
+    root.querySelector<HTMLButtonElement>('.menu > button')!.click();
+    fixture.detectChanges();
+    const menuItem = Array.from(root.querySelectorAll<HTMLButtonElement>('#settings-menu button'))
+      .find(button => button.textContent?.trim() === 'Recordatorios anuales')!;
+    menuItem.click();
+    fixture.detectChanges();
+    const item = { recordatorio_id: 7, mes: 2, dia: 29, hora: null, texto: 'Original', repetir: true };
+    http.expectOne('/api/recordatorios/recurrentes').flush([item]);
+    flushMicrotasks();
+    fixture.detectChanges();
+    expect(root.querySelector('h2')?.textContent).toBe('Recordatorios anuales');
+    root.querySelector<HTMLButtonElement>('.list-item button')!.click();
+    fixture.detectChanges();
+    flushMicrotasks();
+    fixture.detectChanges();
+    const input = (name: string) => root.querySelector<HTMLInputElement>(`[name="${name}"]`)!;
+    input('dia').value = '30';
+    input('dia').dispatchEvent(new Event('input'));
+    fixture.detectChanges();
+    expect(root.querySelector<HTMLButtonElement>('form button[type="submit"]')!.disabled).toBeTrue();
+    input('dia').value = '28';
+    input('dia').dispatchEvent(new Event('input'));
+    const text = root.querySelector<HTMLTextAreaElement>('textarea[name="texto"]')!;
+    text.value = 'Actualizado';
+    text.dispatchEvent(new Event('input'));
+    input('repetir').click();
+    fixture.detectChanges();
+    expect(root.textContent).toContain('desaparecerá de esta lista');
+    root.querySelector<HTMLButtonElement>('form button[type="submit"]')!.click();
+    const update = http.expectOne('/api/recordatorios/7');
+    expect(update.request.method).toBe('PATCH');
+    expect(update.request.body).toEqual({ mes: 2, dia: 28, hora: null, texto: 'Actualizado', repetir: false });
+    update.flush({ error: 'No se pudo guardar' }, { status: 409, statusText: 'Conflict' });
+    flushMicrotasks();
+    fixture.detectChanges();
+    expect(root.textContent).toContain('No se pudo guardar');
+    expect(text.value).toBe('Actualizado');
+    root.querySelector<HTMLButtonElement>('form button[type="submit"]')!.click();
+    http.expectOne('/api/recordatorios/7').flush({}, { status: 200, statusText: 'OK' });
+    flushMicrotasks();
+    http.expectOne('/api/recordatorios/recurrentes').flush([]);
+    flushMicrotasks();
+    http.expectOne('/api/calendario/2026').flush({
+      recordatorios: [{ recordatorio_id: 7, fecha: '2026-02-28', hora: null, texto: 'Actualizado', repetir: false }],
+      notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: []
+    });
+    flushMicrotasks();
+    fixture.detectChanges();
+    expect(root.textContent).toContain('No hay recordatorios anuales');
+    root.querySelector<HTMLButtonElement>('.navigation .nav-link')!.click();
+    fixture.detectChanges();
+    expect(root.querySelector('.day[aria-label="2026-02-28"] .note-preview')?.textContent).toContain('Actualizado');
+    fixture.componentInstance.state.logout();
+  }));
+
+  it('exports and imports a calendar CSV from settings and reports failures', fakeAsync(() => {
+    const fixture = TestBed.createComponent(App);
+    fixture.detectChanges();
+    login(fixture);
+    fixture.detectChanges();
+    const root: HTMLElement = fixture.nativeElement;
+    root.querySelector<HTMLButtonElement>('.menu > button')!.click();
+    fixture.detectChanges();
+    Array.from(root.querySelectorAll<HTMLButtonElement>('#settings-menu button'))
+      .find(button => button.textContent?.trim() === 'Importar/exportar calendario')!.click();
+    fixture.detectChanges();
+    expect(root.querySelector('h2')?.textContent).toBe('Importar/exportar calendario');
+    const exportButton = Array.from(root.querySelectorAll<HTMLButtonElement>('.panel button'))
+      .find(button => button.textContent?.includes('Exportar CSV'))!;
+    exportButton.click();
+    const failed = http.expectOne('/api/calendario/2026/exportar');
+    expect(failed.request.headers.get('Authorization')).toBe('Bearer token');
+    failed.flush('{"error":"Error al exportar"}', { status: 500, statusText: 'Error' });
+    flushMicrotasks();
+    fixture.detectChanges();
+    expect(root.textContent).toContain('Error al exportar');
+    spyOn(URL, 'createObjectURL').and.returnValue('blob:calendar');
+    const revoke = spyOn(URL, 'revokeObjectURL');
+    const download = spyOn(HTMLAnchorElement.prototype, 'click');
+    exportButton.click();
+    http.expectOne('/api/calendario/2026/exportar').flush('tipo,ref\r\n');
+    flushMicrotasks();
+    fixture.detectChanges();
+    expect(download).toHaveBeenCalled();
+    expect(revoke).toHaveBeenCalledWith('blob:calendar');
+    expect(root.textContent).toContain('Calendario exportado');
+
+    const exportSelect = root.querySelector<HTMLSelectElement>('.panel select')!;
+    const allYears = Array.from(exportSelect.options).find(option => option.textContent?.trim() === 'Todos los años')!;
+    exportSelect.value = allYears.value;
+    exportSelect.dispatchEvent(new Event('change'));
+    fixture.detectChanges();
+    exportButton.click();
+    const allRequest = http.expectOne('/api/calendario/exportar');
+    expect(allRequest.request.headers.get('Authorization')).toBe('Bearer token');
+    allRequest.flush('tipo,ref\r\n');
+    flushMicrotasks();
+    fixture.detectChanges();
+    expect((download.calls.mostRecent().object as HTMLAnchorElement).download).toBe('calendario-completo.csv');
+
+    const file = new File(['datos'], 'calendar.csv', { type: 'text/csv' });
+    const selection = new DataTransfer();
+    selection.items.add(file);
+    const input = root.querySelector<HTMLInputElement>('input[type="file"]')!;
+    input.files = selection.files;
+    input.dispatchEvent(new Event('change'));
+    fixture.detectChanges();
+    const importButton = Array.from(root.querySelectorAll<HTMLButtonElement>('.panel button'))
+      .find(button => button.textContent?.includes('Importar CSV'))!;
+    expect(importButton.disabled).toBeFalse();
+    importButton.click();
+    const request = http.expectOne('/api/calendario/importar');
+    expect(request.request.body).toBe(file);
+    request.flush({ error: 'Ya existe una nota' }, { status: 409, statusText: 'Conflict' });
+    flushMicrotasks();
+    fixture.detectChanges();
+    expect(root.textContent).toContain('Ya existe una nota');
+    expect(importButton.disabled).toBeFalse();
+    importButton.click();
+    http.expectOne('/api/calendario/importar').flush({ year: 2027, asignaciones: 1, tipados: 0, notas: 1, recordatorios: 0 });
+    flushMicrotasks();
+    http.expectOne('/api/get_years').flush({ years: [2025, 2026, 2027] });
+    flushMicrotasks();
+    http.expectOne('/api/calendario/2027').flush({
+      recordatorios: [], notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: []
+    });
+    flushMicrotasks();
+    fixture.detectChanges();
+    expect(root.textContent).toContain('Calendario 2027 importado');
+    expect(importButton.disabled).toBeTrue();
+    expect(input.value).toBe('');
+    const secondSelection = new DataTransfer();
+    secondSelection.items.add(file);
+    input.files = secondSelection.files;
+    input.dispatchEvent(new Event('change'));
+    fixture.detectChanges();
+    importButton.click();
+    http.expectOne('/api/calendario/importar').flush({
+      years: [2025, 2026], asignaciones: 2, tipados: 0, notas: 0, recordatorios: 0
+    });
+    flushMicrotasks();
+    http.expectOne('/api/get_years').flush({ years: [2025, 2026, 2027] });
+    flushMicrotasks();
+    http.expectOne('/api/calendario/2027').flush({
+      recordatorios: [], notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: []
+    });
+    flushMicrotasks();
+    fixture.detectChanges();
+    expect(root.textContent).toContain('Calendario completo importado');
+    expect(importButton.disabled).toBeTrue();
+    fixture.componentInstance.state.logout();
   }));
 
   it('creates a user and sends only changed fields when editing', fakeAsync(() => {
@@ -1192,24 +1585,27 @@ describe('Calendar application', () => {
     const created = http.expectOne('/api/tipos-fecha');
     expect(created.request.method).toBe('POST');
     expect(created.request.body.en_borde).toBe(false);
+    expect(created.request.body.activo).toBeFalse();
     created.flush({ tipo_id: 2 });
     flushMicrotasks();
-    const type = { tipo_id: 2, nombre: 'Vacaciones', descripcion: '', color: '#ef4444', en_borde: false };
+    const type = { tipo_id: 2, nombre: 'Vacaciones', descripcion: '', color: '#ef4444', en_borde: false, activo: true };
     http.expectOne('/api/tipos-fecha').flush([type]);
     flushMicrotasks();
-    http.expectOne('/api/calendario/2026').flush({ notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [] });
+    http.expectOne('/api/calendario/2026').flush({ recordatorios: [], notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [] });
     flushMicrotasks();
     types.editType(type);
     types.typeForm.en_borde = true;
+    types.typeForm.activo = false;
     void types.saveType({ invalid: false } as NgForm);
     const updated = http.expectOne('/api/tipos-fecha/2');
     expect(updated.request.method).toBe('PATCH');
     expect(updated.request.body.en_borde).toBe(true);
+    expect(updated.request.body.activo).toBeFalse();
     updated.flush({ ...type, en_borde: true });
     flushMicrotasks();
     http.expectOne('/api/tipos-fecha').flush([{ ...type, en_borde: true }]);
     flushMicrotasks();
-    http.expectOne('/api/calendario/2026').flush({ notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [] });
+    http.expectOne('/api/calendario/2026').flush({ recordatorios: [], notas: [], contexto_vacaciones: { anterior: [], posterior: [] }, asignaciones: [], tipados: [] });
     flushMicrotasks();
     expect(types.dateTypes[0].en_borde).toBeTrue();
     app.state.logout();

@@ -1,7 +1,7 @@
 import { Injectable } from '@angular/core';
 import { HttpClient, HttpErrorResponse, HttpHeaders } from '@angular/common/http';
 import { firstValueFrom } from 'rxjs';
-import { CalendarData, CurrentUser, Day, Month, Session, VacationContext, View } from './models';
+import { CalendarData, CurrentUser, Day, Month, Reminder, Session, VacationContext, View } from './models';
 
 @Injectable({ providedIn: 'root' })
 export class AppState {
@@ -24,6 +24,7 @@ export class AppState {
   years: number[] = [];
   year: number | null = null;
   calendar: Month[] = [];
+  loginReminders: Reminder[] = [];
   vacationContext: VacationContext = { anterior: [], posterior: [] };
 
   constructor(private readonly http: HttpClient) {}
@@ -53,6 +54,10 @@ export class AppState {
       this.scheduleExpiry(expiry);
       authenticated = true;
       await this.loadSession();
+      const today = new Date();
+      const day = `${String(today.getFullYear()).padStart(4, '0')}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+      const reminders = await this.request<Reminder[]>('GET', `/api/recordatorios/${day}`);
+      if (this.token === session.access_token) this.loginReminders = reminders;
     });
     return authenticated;
   }
@@ -74,6 +79,7 @@ export class AppState {
     this.years = [];
     this.year = null;
     this.calendar = [];
+    this.loginReminders = [];
     this.vacationContext = { anterior: [], posterior: [] };
     this.calendarLoading = false;
     this.view = 'calendar';
@@ -97,6 +103,28 @@ export class AppState {
   async request<T>(method: string, url: string, body?: unknown): Promise<T> {
     const headers = new HttpHeaders({ Authorization: `Bearer ${this.token}` });
     return firstValueFrom(this.http.request<T>(method, url, { body, headers }));
+  }
+
+  async requestCsv(url: string): Promise<string> {
+    const headers = new HttpHeaders({ Authorization: `Bearer ${this.token}` });
+    try {
+      return await firstValueFrom(this.http.get(url, { headers, responseType: 'text' }));
+    } catch (error) {
+      if (error instanceof HttpErrorResponse && typeof error.error === 'string') {
+        let body: unknown;
+        try {
+          body = JSON.parse(error.error);
+        } catch (parseError) {
+          if (!(parseError instanceof SyntaxError)) throw parseError;
+          throw error;
+        }
+        throw new HttpErrorResponse({
+          error: body, headers: error.headers, status: error.status, statusText: error.statusText,
+          url: error.url ?? undefined
+        });
+      }
+      throw error;
+    }
   }
 
   async run(action: () => Promise<void>): Promise<void> {
@@ -177,7 +205,8 @@ export class AppState {
           number: day, date: key,
           assignments: data.asignaciones.filter(item => item.fecha === key),
           typings: data.tipados.filter(item => item.fecha === key),
-          note: data.notas.find(item => item.fecha === key)?.texto ?? null
+          note: data.notas.find(item => item.fecha === key)?.texto ?? null,
+          reminders: data.recordatorios.filter(item => item.fecha === key)
         });
       }
       return { name, days };
